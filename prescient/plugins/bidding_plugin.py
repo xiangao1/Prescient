@@ -79,13 +79,13 @@ import numpy as np
 from pandas import read_csv
 import os
 
-def get_gpoints_gvalues(cost_curve_store_dir,date,gen_name = '102_STEAM_3',verbose = False):
+def get_gpoints_gvalues(cost_curve_store_dir,date,gen_name = '102_STEAM_3',horizon = 24,verbose = False):
 
     gpoints = {}
     gvalues = {}
 
     # read the csv file
-    for h in range(24):
+    for h in range(horizon):
 
         if verbose:
             print("")
@@ -168,7 +168,7 @@ def tweak_sced_before_solve(options, simulator, sced_instance):
                           'values':p_cost
                          }
 
-prescient.plugins.register_before_operations_solve_callback(tweak_sced_before_solve)
+# prescient.plugins.register_before_operations_solve_callback(tweak_sced_before_solve)
 
 def after_sced(options, simulator, sced_instance):
     current_time = simulator.time_manager.current_time
@@ -279,21 +279,19 @@ def tweak_ruc_before_solve(options, simulator, ruc_instance, ruc_date, ruc_hour)
     thermalBid.stochastic_bidding(m_bid,price_forecast_dir,cost_curve_store_dir,date_as_string)
 
     gen_name = options.bidding_generator
-    gpoints, gvalues = get_gpoints_gvalues(cost_curve_store_dir,
-                                            date=date_as_string, gen_name=gen_name)
+    gpoints, gvalues = get_gpoints_gvalues(cost_curve_store_dir,\
+                                            date=date_as_string,\
+                                            gen_name=gen_name,\
+                                            horizon = options.ruc_horizon)
     gen_dict = ruc_instance.data['elements']['generator'][gen_name]
 
-    print(gen_dict['p_cost'])
-
-    p_cost = [[(gpnt, gval) for gpnt, gval in zip(gpoints[t], gvalues[t])] for t in range(24)]
+    p_cost = [[(gpnt, gval) for gpnt, gval in zip(gpoints[t], gvalues[t])] for t in range(options.ruc_horizon)]
 
     gen_dict['p_cost'] = {'data_type': 'time_series',
                           'values': [{'data_type' : 'cost_curve',
                                      'cost_curve_type':'piecewise',
-                                     'values':p_cost[t]} for t in range(1)]
+                                     'values':p_cost[t]} for t in range(options.ruc_horizon)]
                          }
-
-    print(gen_dict['p_cost'])
 
 prescient.plugins.register_before_ruc_solve_callback(tweak_ruc_before_solve)
 

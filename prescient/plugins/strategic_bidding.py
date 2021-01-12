@@ -1289,7 +1289,7 @@ class DAM_thermal_bidding:
 
         # write the price curves to a csv file
         for j in m.UNITS:
-            for h in range(24):
+            for h in m.HOUR:
                 curve = np.concatenate((power_output_dict[j][h].reshape(-1,1),\
                 cost_dict[j][h].reshape(-1,1)),axis = 1)
                 np.savetxt(cost_curve_store_dir+j+\

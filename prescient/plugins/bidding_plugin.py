@@ -1,8 +1,6 @@
 from optparse import Option
 import prescient.plugins
 
-print("Hello from Xian's plugin")
-
 # Add command line options
 opt = Option('--track-ruc-signal',
              help='When tracking the market signal, RUC signals are used instead of the SCED signal.',
@@ -78,6 +76,27 @@ prescient.plugins.add_custom_commandline_option(opt)
 from strategic_bidding import DAM_thermal_bidding
 import dateutil.parser
 import numpy as np
+from pandas import read_csv
+import os
+
+def get_gpoints_gvalues(cost_curve_store_dir,date,gen_name = '102_STEAM_3',verbose = False):
+
+    gpoints = {}
+    gvalues = {}
+
+    # read the csv file
+    for h in range(24):
+
+        if verbose:
+            print("")
+            print("Getting cost curve from Date: {}, Hour: {}.".format(date,h))
+
+        gpoints[h] = list(read_csv(cost_curve_store_dir+gen_name+\
+        '_date={}_hour={}_cost_curve.csv'.format(date,h),header = None).values[:,0])
+        gvalues[h] = list(read_csv(cost_curve_store_dir+gen_name+\
+        '_date={}_hour={}_cost_curve.csv'.format(date,h),header = None).values[:,1])
+
+    return gpoints,gvalues
 
 def initialize_plugin(options, simulator):
     # Xian: add 2 np arrays to store RUC and SCED schedules for the interested generator
@@ -100,13 +119,8 @@ def initialize_plugin(options, simulator):
     # build bidding model
     if options.bidding:
         m_bid = thermal_bid.create_bidding_model(generator = options.bidding_generator)
-        price_forecast_dir = '../../prescient/plugins/price_forecasts/date={}_lmp_forecasts.csv'.format(first_date)
+        price_forecast_dir = '../../prescient/plugins/price_forecasts/'
         cost_curve_store_dir = '../../prescient/plugins/cost_curves/'
-
-        # solve the bidding model for the first simulation day
-        #
-        # Consider moving out of initialization, do it later in the process
-        thermal_bid.stochastic_bidding(m_bid,price_forecast_dir,cost_curve_store_dir,first_date)
 
         simulator.data_manager.extensions['cost_curve_store_dir'] = cost_curve_store_dir
         simulator.data_manager.extensions['price_forecast_dir'] = price_forecast_dir
@@ -129,7 +143,7 @@ def initialize_plugin(options, simulator):
         # model in real-time, so it can update the initial condition properly
         # every hour
         simulator.data_manager.extensions['sced_tracker_power_record'] = \
-            {options.bidding_generator: 
+            {options.bidding_generator:
              np.repeat(value(m_track_sced.pre_pow[options.bidding_generator]),\
                        value(m_track_sced.pre_up_hour[options.bidding_generator]))
             }
@@ -149,9 +163,9 @@ def tweak_sced_before_solve(options, simulator, sced_instance):
 
     p_cost = [(gpnt, gval) in zip(gpoints[hour], gvalues[hour])]
 
-    gen_dict['p_cost'] = {'data_type' : 'cost_curve', 
-                          'cost_curve_type':'piecewise', 
-                          'values':p_cost 
+    gen_dict['p_cost'] = {'data_type' : 'cost_curve',
+                          'cost_curve_type':'piecewise',
+                          'values':p_cost
                          }
 
 prescient.plugins.register_before_operations_solve_callback(tweak_sced_before_solve)
@@ -217,13 +231,13 @@ def after_sced(options, simulator, sced_instance):
     thermalBid.update_model_params(m_track_sced,sced_tracker_power_record, hybrid = options.hybrid_tracking)
     thermalBid.reset_constraints(m_track_sced,options.sced_horizon)
 
-prescient.plugins.register_after_operations_generation_callback(after_sced)
+prescient.plugins.register_after_operations_callback(after_sced)
 
 def update_observed_thermal_dispatch(options, simulator, ops_stats):
 
     ## TODO: read current observed_thermal_dispatch and adjust observed_thermal_head_room
     ##       base on the difference with actuals
-    ## TODO: get track_gen_pow_ruc and track_gen_pow_sced from simulator.data_manager.extensions 
+    ## TODO: get track_gen_pow_ruc and track_gen_pow_sced from simulator.data_manager.extensions
     h = simulator.time_manager.hour
     if options.track_ruc_signal:
         print('Making changes in observed power output using tracking RUC model.')
@@ -238,41 +252,48 @@ def update_observed_thermal_dispatch(options, simulator, ops_stats):
 prescient.plugins.register_update_operations_stats_callback(update_observed_thermal_dispatch)
 
 def tweak_ruc_before_solve(options, simulator, ruc_instance, ruc_date, ruc_hour):
+
     if not options.bidding:
         return
+
     print("Getting cost cuves for UC.\n")
     current_time = simulator.time_manager.current_time
+
+    thermalBid = simulator.data_manager.extensions['thermal_bid']
+    m_bid = simulator.data_manager.extensions['m_bid']
+
+    price_forecast_dir = simulator.data_manager.extensions['price_forecast_dir']
+    cost_curve_store_dir = simulator.data_manager.extensions['cost_curve_store_dir']
+
     if current_time is not None:
         date_as_string = ruc_date
-
-        thermalBid = simulator.data_manager.extensions['thermal_bid']
-        m_bid = simulator.data_manager.extensions['m_bid']
 
         # Xian: solve bidding problem here
         thermalBid.update_model_params(m_bid,ruc_dispatch_level_current)
         thermalBid.reset_constraints(m_bid,options.ruc_horizon)
 
-        price_forecast_dir = simulation.data_manager.extensions['price_forecast_dir']
-        cost_curve_store_dir = simulation.data_manager.extensions['cost_curve_store_dir']
-
-        # solve the bidding model for the first simulation day
-        thermalBid.stochastic_bidding(m_bid,price_forecast_dir,cost_curve_store_dir,date_as_string)
-
     else: # first RUC solve
         date_as_string = ruc_date
 
+    # solve the bidding model for the first simulation day
+    thermalBid.stochastic_bidding(m_bid,price_forecast_dir,cost_curve_store_dir,date_as_string)
+
     gen_name = options.bidding_generator
-    gpionts, gvalues = get_gpoints_gvalues(simulator.data_manager.extensions['cost_curve_store_dir'],
+    gpoints, gvalues = get_gpoints_gvalues(cost_curve_store_dir,
                                             date=date_as_string, gen_name=gen_name)
     gen_dict = ruc_instance.data['elements']['generator'][gen_name]
 
-    p_cost = [[(gpnt, gval) in zip(gpoints[t], gvalues[t])] for t in range(24)]
+    print(gen_dict['p_cost'])
 
-    gen_dict['p_cost'] = {'data_type': 'time_series', 
-                          'values': [{'data_type' : 'cost_curve', 
-                                     'cost_curve_type':'piecewise', 
-                                     'values':p_cost[t]} for t in range(24)]
+    p_cost = [[(gpnt, gval) for gpnt, gval in zip(gpoints[t], gvalues[t])] for t in range(24)]
+
+    gen_dict['p_cost'] = {'data_type': 'time_series',
+                          'values': [{'data_type' : 'cost_curve',
+                                     'cost_curve_type':'piecewise',
+                                     'values':p_cost[t]} for t in range(1)]
                          }
+
+    print(gen_dict['p_cost'])
 
 prescient.plugins.register_before_ruc_solve_callback(tweak_ruc_before_solve)
 
@@ -280,16 +301,16 @@ def after_ruc(options, simulator, ruc_plan, ruc_date, ruc_hour):
     if not options.track_ruc_signal:
         return
     ruc_instance = ruc_plan.deterministic_ruc_instance
-    
+
     date_idx = simulator.time_manager.dates_to_simulate.index(ruc_date)
 
     gen_name = options.bidding_generator
-    
+
     g_dict = ruc_instance.data['elements']['generator'][gen_name]
     ruc_dispatch_level_for_next_period = {g: g_dict['pg']['values']}
 
     simulator.data_manager.extensions['ruc_dispatch_level_for_next_period'] = \
-            ruc_dispatch_level_for_next_period 
+            ruc_dispatch_level_for_next_period
 
     ruc_schedule_arr = simulator.data_manager.extensions['ruc_schedule_arr']
 

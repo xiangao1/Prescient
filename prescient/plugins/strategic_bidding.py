@@ -8,6 +8,7 @@ from pyomo.environ import *
 import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
 import copy
+import os
 
 class DAM_thermal_bidding:
 
@@ -1269,7 +1270,9 @@ class DAM_thermal_bidding:
         print("In stochastic_bidding\n")
 
         # read forecasts
-        forecasts = pd.read_csv(price_forecast_dir,header = None).values
+        price_forecast_file = os.path.join(price_forecast_dir,\
+                                           'date={}_lmp_forecasts.csv'.format(date))
+        forecasts = pd.read_csv(price_forecast_file,header = None).values
 
         # pass the forecast into pyomo model
         for i in m.SCENARIOS:

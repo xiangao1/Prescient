@@ -211,7 +211,8 @@ def after_sced(options, simulator, sced_instance):
     # record the track power output profile
     if options.hybrid_tracking == False:
         track_gen_pow_sced = thermalBid.extract_pow_s_s(m_track_sced,\
-                                                    horizon = options.sced_horizon, verbose = False)
+                                                        horizon = options.sced_horizon, \
+                                                        verbose = False)
         thermal_track_gen_pow_sced = track_gen_pow_sced
         thermal_generated_sced = track_gen_pow_sced
     else:
@@ -245,16 +246,23 @@ def update_observed_thermal_dispatch(options, simulator, ops_stats):
     ## TODO: read current observed_thermal_dispatch and adjust observed_thermal_head_room
     ##       base on the difference with actuals
     ## TODO: get track_gen_pow_ruc and track_gen_pow_sced from simulator.data_manager.extensions
+    current_time = simulator.time_manager.current_time
+    h = current_time.hour
+    date_as_string = current_time.date
+    date_idx = simulator.time_manager.dates_to_simulate.index(date_as_string)
+
+    total_power_delivered_arr = simulator.data_manager.extensions['total_power_delivered_arr']
+
     h = simulator.time_manager.current_time.hour
     if options.track_ruc_signal:
         print('Making changes in observed power output using tracking RUC model.')
         g = options.bidding_generator
-        ops_stats.observed_thermal_dispatch_levels[g] = track_gen_pow_ruc[g][h]
+        ops_stats.observed_thermal_dispatch_levels[g] = total_power_delivered_arr[h,date_idx]
 
     elif options.track_sced_signal:
         print('Making changes in observed power output using tracking SCED model.')
         g = options.bidding_generator
-        ops_stats.observed_thermal_dispatch_levels[g] = track_gen_pow_sced[g][0]
+        ops_stats.observed_thermal_dispatch_levels[g] = total_power_delivered_arr[h,date_idx]
 
 prescient.plugins.register_update_operations_stats_callback(update_observed_thermal_dispatch)
 

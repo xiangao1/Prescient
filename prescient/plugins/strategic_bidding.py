@@ -1633,7 +1633,7 @@ class DAM_thermal_bidding:
         return
 
     @staticmethod
-    def update_model_params(m,control_pow,hybrid = False):
+    def update_model_params(m,control_pow,unit = '102_STEAM_3',hybrid = False):
 
         '''
         This method takes a thermal generator model and update its initial power
@@ -1651,36 +1651,34 @@ class DAM_thermal_bidding:
         def group_consecutive(a):
             return np.split(a, np.where(np.diff(a) != 1)[0] + 1)
 
-        for unit in m.UNITS:
+        ## update the model
+        # if it was on in the previous day's last hour
+        if control_pow[-1] > 0:
+            # find the power where they are 0
+            pow_idx = np.where(np.array(control_pow) > 0)[0]
 
-            ## update the model
-            # if it was on in the previous day's last hour
-            if control_pow[unit][-1] > 0:
-                # find the power where they are 0
-                pow_idx = np.where(np.array(control_pow[unit]) > 0)[0]
+            # find the last chunk of indices where consecutively
+            consecutive_idx = group_consecutive(pow_idx)[-1]
 
-                # find the last chunk of indices where consecutively
-                consecutive_idx = group_consecutive(pow_idx)[-1]
+            m.pre_on_off[unit] = 1
+            m.pre_up_hour[unit] = len(consecutive_idx)
+            m.pre_dw_hour[unit] = 0
+            m.pre_pow[unit] = control_pow[-1]
 
-                m.pre_on_off[unit] = 1
-                m.pre_up_hour[unit] = len(consecutive_idx)
-                m.pre_dw_hour[unit] = 0
-                m.pre_pow[unit] = control_pow[unit][-1]
+        else:
+            # find the power where they are 0
+            pow_idx = np.where(np.array(control_pow) == 0)[0]
 
-            else:
-                # find the power where they are 0
-                pow_idx = np.where(np.array(control_pow[unit]) == 0)[0]
+            # find the last chunk of indices where consecutively
+            consecutive_idx = group_consecutive(pow_idx)[-1]
 
-                # find the last chunk of indices where consecutively
-                consecutive_idx = group_consecutive(pow_idx)[-1]
+            m.pre_on_off[unit] = 0
+            m.pre_up_hour[unit] = 0
+            m.pre_dw_hour[unit] = len(consecutive_idx)
+            m.pre_pow[unit] = 0
 
-                m.pre_on_off[unit] = 0
-                m.pre_up_hour[unit] = 0
-                m.pre_dw_hour[unit] = len(consecutive_idx)
-                m.pre_pow[unit] = 0
-
-            if hybrid:
-                # this only works for tracking sced signal
-                m.pre_SOC[unit] = value(m.S_SOC[unit,0,0])
+        if hybrid:
+            # this only works for tracking sced signal
+            m.pre_SOC[unit] = value(m.S_SOC[unit,0,0])
 
         return

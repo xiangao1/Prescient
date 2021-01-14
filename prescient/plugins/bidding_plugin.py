@@ -130,14 +130,15 @@ def initialize_plugin(options, simulator):
     # build tracking model
     if options.track_ruc_signal:
         print('Building a track model for RUC signals.')
-        simulator.data_manager.extensions['m_track_ruc'] = \
-            thermal_bid.build_tracking_model(options.ruc_horizon, generator = options.bidding_generator,
-                                            track_type = 'RUC', hybrid = options.hybrid_tracking)
+        simulator.data_manager.extensions['m_track_ruc'] = thermal_bid.build_tracking_model(options.ruc_horizon, \
+                                                                                            generator = options.bidding_generator,\
+                                                                                            track_type = 'RUC', \
+                                                                                            hybrid = options.hybrid_tracking)
 
     elif options.track_sced_signal:
         print('Building a track model for SCED signals.')
         m_track_sced = thermal_bid.build_tracking_model(options.sced_horizon,\
-                                                        generator = options.bidding_generator,
+                                                        generator = options.bidding_generator,\
                                                         track_type = 'SCED',\
                                                         hybrid = options.hybrid_tracking)
         simulator.data_manager.extensions['m_track_sced'] = m_track_sced
@@ -223,10 +224,9 @@ def after_ruc(options, simulator, ruc_plan, ruc_date, ruc_hour):
         simulator.data_manager.extensions['ruc_dispatch_level_for_next_period'] = \
                 ruc_dispatch_level_for_next_period
 
-
     ruc_schedule_arr = simulator.data_manager.extensions['ruc_schedule_arr']
 
-    # record the ruc signal from the first day
+    # record the ruc signal
     ruc_schedule_arr[:,date_idx] = np.array(ruc_dispatch_level_for_next_period[options.bidding_generator]).flatten()[:24]
 
     if options.track_ruc_signal:
@@ -234,10 +234,12 @@ def after_ruc(options, simulator, ruc_plan, ruc_date, ruc_hour):
         m_track_ruc = simulator.data_manager.extensions['m_track_ruc']
         thermalBid = simulator.data_manager.extensions['thermal_bid']
 
-        thermalBid.pass_schedule_to_track_and_solve(m_track_ruc,ruc_dispatch_level_for_next_period,\
-                        RT_price=None, deviation_weight = options.deviation_weight, \
-                        ramping_weight = options.ramping_weight,\
-                        cost_weight = options.cost_weight)
+        thermalBid.pass_schedule_to_track_and_solve(m_track_ruc,\
+                                                    ruc_dispatch_level_for_next_period,\
+                                                    RT_price=None,\
+                                                    deviation_weight = options.deviation_weight, \
+                                                    ramping_weight = options.ramping_weight,\
+                                                    cost_weight = options.cost_weight)
 
 
         # record the track power output profile
@@ -255,8 +257,7 @@ def after_ruc(options, simulator, ruc_plan, ruc_date, ruc_hour):
                                                                hybrid = True, \
                                                                verbose = False)
 
-        # record the total power delivered
-        # and thermal power delivered
+        # record the total power delivered and thermal power delivered
         total_power_delivered_arr = simulator.data_manager.extensions['total_power_delivered_arr']
         thermal_power_delivered_arr = simulator.data_manager.extensions['thermal_power_delivered_arr']
         thermal_power_generated_arr = simulator.data_manager.extensions['thermal_power_generated_arr']
@@ -360,7 +361,7 @@ def after_sced(options, simulator, sced_instance):
 
         # update the track model
         thermalBid.update_model_params(m_track_sced,\
-                                       [thermal_power_generated_arr[h,date_idx]], \
+                                       sced_tracker_power_record[options.bidding_generator], \
                                        unit = options.bidding_generator,\
                                        hybrid = options.hybrid_tracking)
         thermalBid.reset_constraints(m_track_sced,options.sced_horizon)
@@ -369,9 +370,6 @@ prescient.plugins.register_after_operations_callback(after_sced)
 
 def update_observed_thermal_dispatch(options, simulator, ops_stats):
 
-    ## TODO: read current observed_thermal_dispatch and adjust observed_thermal_head_room
-    ##       base on the difference with actuals
-    ## TODO: get track_gen_pow_ruc and track_gen_pow_sced from simulator.data_manager.extensions
     current_time = simulator.time_manager.current_time
     h = current_time.hour
     date_as_string = current_time.date
@@ -379,7 +377,6 @@ def update_observed_thermal_dispatch(options, simulator, ops_stats):
 
     total_power_delivered_arr = simulator.data_manager.extensions['total_power_delivered_arr']
 
-    h = simulator.time_manager.current_time.hour
     if options.track_ruc_signal:
         print('Making changes in observed power output using tracking RUC model.')
         g = options.bidding_generator

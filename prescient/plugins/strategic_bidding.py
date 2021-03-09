@@ -253,7 +253,6 @@ class DAM_thermal_bidding:
         ## add min up and down time constraints
         self._add_UT_DT_constraints(m)
 
-
         ## add bidding constraints
         self._add_bidding_constraints(m)
 

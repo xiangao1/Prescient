@@ -1,11 +1,6 @@
 import pandas as pd
 import pyomo.environ as pyo
-import matplotlib.pyplot as plt
-from scipy.interpolate import interp1d
-import copy
-import os
 from collections import deque
-from itertools import combinations
 
 def get_data_given(df, bus=None, date=None, hour=None, generator=None, fuel_type=None):
 

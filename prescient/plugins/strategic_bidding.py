@@ -75,7 +75,9 @@ class DAM_thermal_bidding:
 
     n_scenario = 10
 
-    def __init__(self,rts_gmlc_data_dir, generators = None):
+    def __init__(self,rts_gmlc_data_dir, price_forecast_dir,generators = None):
+
+        self.price_forecast_dir = price_forecast_dir
 
         self.model_data = self.assemble_model_data(generator_names = generators, \
                                                    rts_gmlc_data_dir = rts_gmlc_data_dir)
@@ -619,13 +621,15 @@ class DAM_thermal_bidding:
 
         return power_output_dict, marginal_cost_dict, cost_dict
 
-    def stochastic_bidding(self,m,price_forecast_dir,cost_curve_store_dir,date):
+    def stochastic_bidding(self,date):
 
         print("")
         print("In stochastic_bidding\n")
 
+        m = self.model
+
         # read forecasts
-        price_forecast_file = os.path.join(price_forecast_dir,\
+        price_forecast_file = os.path.join(self.price_forecast_dir,\
                                            'date={}_lmp_forecasts.csv'.format(date))
         forecasts = pd.read_csv(price_forecast_file,header = None).values
 
@@ -638,16 +642,35 @@ class DAM_thermal_bidding:
         solver = SolverFactory('gurobi')
         result = solver.solve(m,tee=True)
 
-        # get the bidding curves
-        power_output_dict, marginal_cost_dict, cost_dict = \
-        self.get_bid_power_price(m,forecasts,verbose = True)
+        ## TODO: extract the bids out from the model
 
-        # write the price curves to a csv file
-        for j in m.UNITS:
-            for h in m.HOUR:
-                curve = np.concatenate((power_output_dict[j][h].reshape(-1,1),\
-                cost_dict[j][h].reshape(-1,1)),axis = 1)
-                np.savetxt(cost_curve_store_dir+j+\
-                '_date={}_hour={}_cost_curve.csv'.format(date,h),curve,delimiter=',')
+        ## TODO: save them into a data structure as class property
 
         return
+
+    def pass_bid_to_prescient(self, options, simulator, ruc_instance, ruc_date, ruc_hour):
+
+        # extract bid curve out from the model
+        power_output_dict, marginal_cost_dict, cost_dict = \
+        self.get_bid_power_price(self.model,forecasts,verbose = True)
+
+        ## TODO access the bid from class property
+
+        # TODO: make sure the data type works here
+        # actual passing
+        for gen_name in self.model.UNITS:
+            gen_dict = ruc_instance.data['elements']['generator'][gen_name]
+            p_cost = [[(gpnt, gval) for gpnt, gval in zip(gpoints[t], gvalues[t])] for t in range(options.ruc_horizon)]
+
+            gen_dict['p_cost'] = {'data_type': 'time_series',
+                                  'values': [{'data_type' : 'cost_curve',
+                                             'cost_curve_type':'piecewise',
+                                             'values':p_cost[t]} for t in range(options.ruc_horizon)]
+                                 }
+        return
+
+    def record_bids(self,ruc_date):
+        '''
+        cols: gen, date, hour, power 1, ..., power n, price 1, ..., price n
+        '''
+        pass

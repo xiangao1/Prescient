@@ -115,6 +115,77 @@ def initialize_tracking_object(options, simulator):
     return
 prescient.plugins.register_initialization_callback(initialize_tracking_object)
 
+def bid_into_DAM(options, simulator, ruc_instance, ruc_date, ruc_hour):
+
+    ## TODO: make sure the model is updated
+
+
+    thermal_bid = simulator.data_manager.extensions['thermal_bid']
+
+    # generate bids
+    thermal_bid.stochastic_bidding(thermal_bid.model,ruc_date)
+
+    # pass to prescient
+    thermal_bid.pass_bid_to_prescient(options, simulator, ruc_instance, ruc_date, ruc_hour)
+
+    # record bids
+    thermal_bid.record_bids()
+
+    return
+prescient.plugins.register_before_ruc_solve_callback(bid_into_DAM)
+
+def save_ruc_plan(options, simulator, ruc_plan, ruc_date, ruc_hour):
+
+    # save the ruc plan as a property of tracking object
+
+    pass
+prescient.plugins.register_after_ruc_generation_callback(save_ruc_plan)
+
+def track_sced_signal(options, simulator, sced_instance):
+
+    ## TODO: actual tracking
+
+    ## TODO: record operation results
+
+    ## update the tracking model
+    pass
+prescient.plugins.register_after_operations_callback(track_sced_signal)
+
+def update_observed_thermal_dispatch(options, simulator, ops_stats):
+
+    current_time = simulator.time_manager.current_time
+    h = current_time.hour
+    date_as_string = current_time.date
+    date_idx = simulator.time_manager.dates_to_simulate.index(date_as_string)
+
+    total_power_delivered_arr = simulator.data_manager.extensions['total_power_delivered_arr']
+
+    if options.track_ruc_signal:
+        print('Making changes in observed power output using tracking RUC model.')
+        g = options.bidding_generator
+        ops_stats.observed_thermal_dispatch_levels[g] = total_power_delivered_arr[h,date_idx]
+
+    elif options.track_sced_signal:
+        print('Making changes in observed power output using tracking SCED model.')
+        g = options.bidding_generator
+        ops_stats.observed_thermal_dispatch_levels[g] = total_power_delivered_arr[h,date_idx]
+
+prescient.plugins.register_update_operations_stats_callback(update_observed_thermal_dispatch)
+
+
+def after_ruc_activation(options, simulator):
+
+    # change the ruc plan in tracking object
+    pass
+prescient.plugins.register_after_ruc_activation_callback(after_ruc_activation)
+
+def write_customize_results(options, simulator):
+
+    '''
+    write results in bidding and tracking objects
+    '''
+    pass
+prescient.plugins.register_after_simulation_callback(write_customize_results)
 '''
 def get_gpoints_gvalues(cost_curve_store_dir,date,gen_name = '102_STEAM_3',horizon = 24,verbose = False):
 

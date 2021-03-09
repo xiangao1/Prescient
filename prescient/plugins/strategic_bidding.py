@@ -4,7 +4,7 @@
 
 import numpy as np
 import pandas as pd
-from pyomo.environ import *
+import pyomo.environ as pyo
 import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
 import copy
@@ -12,51 +12,140 @@ import os
 from collections import deque
 from itertools import combinations
 
+def get_data_given(df, bus=None, date=None, hour=None, generator=None, fuel_type=None):
+
+    '''
+    This function gets the data out of a pandas dataframe given one or more
+    options, e.g. time.
+
+    Arguments:
+        df: the dataframe we are interested in
+        bus: the bus ID we want [int]/ the bus name we want [str]
+        date: the date we want [str]
+        hour: the hour we want [int]
+        generator: the generator ID [str]
+        fuel_type: generator fuel, e.g. Coal [str]
+    Returns:
+        df: a dataframe that has the information we specified.
+    '''
+
+    # get data given bus id
+    if bus is not None:
+        # in the original rts-gmlc dataset there is a Bus ID col
+        if 'Bus ID' in df.columns:
+            df = df.loc[(df['Bus ID'] == bus)]
+
+        # in the prescient result data we have to extract bus id from other col
+        # e.g. gennerator name col
+        elif 'Generator' in df.columns:
+            # convert the type to str
+            bus = str(bus)
+            # find the rows that starts with the bus name
+            searchrows = df['Generator'].str.startswith(bus)
+            df = df.loc[searchrows,:]
+
+        elif 'Bus' in df.columns:
+            df = df.loc[(df['Bus'] == bus)]
+
+    # get data given date
+    if date is not None:
+        df = df.loc[(df['Date'] == date)]
+
+    # get data given hour
+    if hour is not None:
+        df = df.loc[(df['Hour'] == hour)]
+
+    # get data given hour
+    if generator is not None:
+
+        # Similarly this is for Prescient result data
+        if 'Generator' in df.columns:
+            df = df.loc[(df['Generator'] == generator)]
+        # this is for rts-gmlc dataset
+        elif 'GEN UID' in df.columns:
+            df = df.loc[(df['GEN UID'] == generator)]
+
+    # get data given fuel
+    if fuel_type is not None:
+        df = df.loc[df['Fuel'] == fuel_type]
+
+    return df
+
 class DAM_thermal_bidding:
 
     ## define a few class properties
-
-    gen_name = ['101_CT_1','102_STEAM_3']
-
-    n_units = len(gen_name)
-
-    # fuel cost $/MMBTU
-    fuel_cost = np.array([10.3494,2.11399])
-
-    # start up heat MMBTU
-    start_up_heat = np.array([5,5284.8])
-
-    # start up cost
-    start_cost = dict(zip(gen_name, fuel_cost * start_up_heat))
-
-    capacity = {'101_CT_1':20,'102_STEAM_3':76}
-    min_pow = {'101_CT_1':8,'102_STEAM_3':30}
-    ramp_up = {'101_CT_1':180,'102_STEAM_3':120}
-    ramp_dw = {'101_CT_1':180,'102_STEAM_3':120}
-    ramp_start_up = {'101_CT_1':8,'102_STEAM_3':76}
-    ramp_shut_dw = {'101_CT_1':8,'102_STEAM_3':76}
-    min_dw_time = {'101_CT_1':1,'102_STEAM_3':4}
-    min_up_time = {'101_CT_1':1,'102_STEAM_3':8}
-
-    output_pts = {'101_CT_1': np.array([0,0.4,0.6,0.8,1]),\
-    '102_STEAM_3':np.array([0,0.394736842,0.596491228,0.798245614,1])}
-    output = {'101_CT_1':np.around(output_pts['101_CT_1']*capacity['101_CT_1'],1),\
-    '102_STEAM_3':np.around(output_pts['102_STEAM_3']*capacity['102_STEAM_3'],1)} #MW
-    power_increae = {'101_CT_1':np.diff(output['101_CT_1']),\
-    '102_STEAM_3':np.diff(output['102_STEAM_3'])}
-    increased_hr = {'101_CT_1': np.array([13114,9456,9476,10352])/1000,\
-    '102_STEAM_3': np.array([11591,8734,9861,10651])/1000}
-    prod_cost = {'101_CT_1': (increased_hr['101_CT_1']*fuel_cost[0]),\
-    '102_STEAM_3': (increased_hr['102_STEAM_3']*fuel_cost[1])}
-    tot_prod_cost = {'101_CT_1':np.cumsum(prod_cost['101_CT_1']*power_increae['101_CT_1']),\
-    '102_STEAM_3':np.cumsum(prod_cost['102_STEAM_3']*power_increae['102_STEAM_3'])}
 
     diff_penalty = 30
 
     n_seg = 4
 
-    def __init__(self,n_scenario):
+    def __init__(self,rts_gmlc_data_dir, generators = None):
         self.n_scenario = n_scenario
+        self.model_data = self.assemble_model_data(generator_names = generators, \
+                                                   rts_gmlc_data_dir = rts_gmlc_data_dir)
+
+    def assemble_model_data(self, generator_names, rts_gmlc_data_dir, **kwargs):
+
+        # read data
+        gen_params = pd.read_csv(rts_gmlc_data_dir + 'gen.csv')
+        gen_params = gen_params[gen_params['GEN UID'].isin(generator_names)]
+
+        model_data = {}
+
+        # generator names
+        model_data['Generator'] = generator_names
+
+        # Pmin [MW]
+        model_data['Pmin'] = dict(zip(generator_names,gen_params['PMin MW']))
+
+        # Pmax [MW]
+        model_data['Pmax'] = dict(zip(generator_names,gen_params['PMax MW']))
+
+        # minimum up time [MW/hr]
+        model_data['UT'] = dict(zip(generator_names,gen_params['Min Up Time Hr'].astype(int)))
+
+        # minimum down time [hr]
+        model_data['DT'] = dict(zip(generator_names,gen_params['Min Down Time Hr'].astype(int)))
+
+        ## ramp rates [MW/hr]
+        ramp_rates = gen_params['Ramp Rate MW/Min'].values * 60
+
+        # ramp up rate [MW/hr]
+        model_data['RU'] = dict(zip(generator_names,ramp_rates))
+
+        # ramp down rate [MW/hr]
+        model_data['RD'] = dict(zip(generator_names,ramp_rates))
+
+        # ramp start up [MW/hr]
+        model_data['SU'] = {gen: min(model_data['Pmin'][gen],model_data['RU'][gen]) for gen in generator_names}
+
+        # ramp shut down [MW/hr] (will use pmin for now)
+        model_data['SD'] = {gen: min(model_data['Pmin'][gen],model_data['RD'][gen]) for gen in generator_names}
+
+        # start up cost [$/SU] (will use the warm start up cost for now)
+        start_up_cost = gen_params['Start Heat Warm MBTU'] * gen_params['Fuel Price $/MMBTU']
+        model_data['SU Cost'] = dict(zip(generator_names,start_up_cost))
+
+        ## production cost
+
+        # power segments and marginal costs
+        model_data['Power Segments'] = {}
+        model_data['Marginal Costs'] = {}
+        for gen in generator_names:
+            df = get_data_given(df = gen_params, generator = gen)
+            for l in range(1,4):
+                # power segements
+                model_data['Power Segments'][(gen,l)] = float(df['Output_pct_{}'.format(l)] * df['PMax MW'])
+
+                # segment marginal cost
+                model_data['Marginal Costs'][(gen,l)] = float(df['HR_incr_{}'.format(l)]/1000 * df['Fuel Price $/MMBTU'])
+
+        model_data['Min Load Cost'] = dict(zip(generator_names,gen_params['HR_avg_0']/1000 * gen_params['Fuel Price $/MMBTU'] * gen_params['PMin MW']))
+
+        for key in kwargs:
+            model_data[key] = {gen: kwargs[key] for gen in generator_names}
+
+        return model_data
 
     @staticmethod
     def _add_UT_DT_constraints(m):
@@ -264,7 +353,7 @@ class DAM_thermal_bidding:
         m.prod_cost_approx = pyo.Expression(m.UNITS,m.HOUR,m.SCENARIOS,rule = prod_cost_fun)
 
         # start up costs
-        def start_cost_fun(m,j,h):
+        def start_cost_fun(m,j,h,k):
             return m.start_up_cost[j]*m.start_up[j,h,k]
         m.start_up_cost_expr = pyo.Expression(m.UNITS,m.HOUR,m.SCENARIOS,rule = start_cost_fun)
 
@@ -331,6 +420,41 @@ class DAM_thermal_bidding:
         for unit in m.UNITS:
             m.pre_P_T[unit] = round(implemented_power_output[unit][-1],2)
             m.pre_on_off[unit] = round(int(implemented_power_output[unit][-1] > 1e-3))
+
+        return
+
+    @staticmethod
+    def update_model(m,implemented_power_output,implemented_shut_down, implemented_start_up):
+
+        self._update_UT_DT(m,implemented_shut_down, implemented_start_up)
+        self._update_power(m,implemented_power_output)
+
+        return
+
+    # define a function to add bidding constraints to models
+    @staticmethod
+    def _add_bidding_constraints(m,NA_con_range = 24):
+
+        '''
+        This function takes the thermal model and add bidding cosntraints
+        to it in order to bid into DAM.
+
+        Note: it is a little different in the paper from what I have done with the
+        energy storage system model. This constraint is enforced based on the energy
+        output instead of power output.
+        '''
+
+        # generate scenarios combinations
+        scenario_comb = combinations(m.SCENARIOS,2)
+
+        # constraints for thermal generators
+        def bidding_con_fun1(m):
+            for k in scenario_comb:
+                for j in m.UNITS:
+                    for h in range(NA_con_range):
+                        yield (m.P_T[j,h,k[0]] - m.P_T[j,h,k[1]])\
+                        *(m.DAM_price[h,k[0]] - m.DAM_price[h,k[1]]) >= 0
+        m.bidding_con1 = pyo.ConstraintList(rule = bidding_con_fun1)
 
         return
 
@@ -862,33 +986,6 @@ class DAM_thermal_bidding:
 
         return m
 
-    # define a function to add bidding constraints to models
-    @staticmethod
-    def _add_bidding_constraints(m,NA_con_range = 24):
-
-        '''
-        This function takes the thermal model and add bidding cosntraints
-        to it in order to bid into DAM.
-
-        Note: it is a little different in the paper from what I have done with the
-        energy storage system model. This constraint is enforced based on the energy
-        output instead of power output.
-        '''
-
-        # generate scenarios combinations
-        scenario_comb = combinations(m.SCENARIOS,2)
-
-        # constraints for thermal generators
-        def bidding_con_fun1(m):
-            for k in scenario_comb:
-                for j in m.UNITS:
-                    for h in range(NA_con_range):
-                        yield (m.P_T[j,h,k[0]] - m.P_T[j,h,k[1]])\
-                        *(m.DAM_price[h,k[0]] - m.DAM_price[h,k[1]]) >= 0
-        m.bidding_con1 = ConstraintList(rule = bidding_con_fun1)
-
-        return
-
     # define a function to extract power ouput for a hour
     @staticmethod
     def extract_pow_s_s(m, horizon = 24, hybrid = False, segment_power = False, verbose=False):
@@ -1409,148 +1506,6 @@ class DAM_thermal_bidding:
         # solve the model
         solver = SolverFactory('gurobi')
         result = solver.solve(m_control,tee=True)
-
-        return
-
-    @staticmethod
-    def reset_constraints(m,plan_horizon):
-
-        '''
-        Input:
-        1. m: The model we want to reset constraints for.
-        2. plan_horizon: unfortunately we have reiterate the planning horizon length for now
-        '''
-
-        ## min up time constraints
-        def minimum_on_fun(m,j,k):
-            if value(m.G[j]) <= 0:
-                return Constraint.Skip
-            elif 0<value(m.G[j])<= plan_horizon:
-                return sum(1-m.on_off[j,h,k] for h in range(int(value(m.G[j])))) == 0
-            else:
-                return sum(1-m.on_off[j,h,k] for h in range(plan_horizon)) == 0
-        #m.minimum_on_con = Constraint(m.UNITS,m.SCENARIOS,rule = minimum_on_fun)
-
-        # minimum up time in the subsequent hours
-        def sub_minimum_on_fun(m):
-            for j in m.UNITS:
-                for k in m.SCENARIOS:
-                    if value(m.G[j])<=0:
-                        low_bnd = 0
-                    else:
-                        low_bnd = int(value(m.G[j]))
-                    for h0 in range(low_bnd,plan_horizon-m.min_up_time[j]+1):
-                        yield sum(m.on_off[j,h,k] for h in range(h0,h0 + m.min_up_time[j]))\
-                        >= m.min_up_time[j]*m.start_up[j,h0,k]
-        #m.sub_minimum_on_con = ConstraintList(rule = sub_minimum_on_fun)
-
-        # minimum up time in the final hours
-        def fin_minimum_on_fun(m):
-            for j in m.UNITS:
-                for k in m.SCENARIOS:
-
-                    if plan_horizon < value(m.min_up_time[j]):
-                        # if goes into here, sub_minimum_on_con must have been
-                        # skipped.
-                        if value(m.G[j]) <= 0:
-                            # if goes into here, minimum_on_con must have been
-                            # skipped
-                            for h0 in range(0,plan_horizon):
-                                yield sum(m.on_off[j,h,k] - m.start_up[j,h0,k] \
-                                for h in range(h0,plan_horizon)) >=0
-
-                        else:
-                            for h0 in range(int(value(m.G[j])),plan_horizon):
-                                yield sum(m.on_off[j,h,k] - m.start_up[j,h0,k] \
-                                for h in range(h0,plan_horizon)) >=0
-
-                    else:
-                        for h0 in range(plan_horizon-m.min_up_time[j]+1,plan_horizon):
-                            yield sum(m.on_off[j,h,k] - m.start_up[j,h0,k] \
-                            for h in range(h0,plan_horizon)) >=0
-        #m.fin_minimum_on_con = ConstraintList(rule = fin_minimum_on_fun)
-
-        ## min down time constraints
-        def minimum_off_fun(m,j,k):
-            if value(m.L[j])<= 0:
-                return Constraint.Skip
-            elif 0<value(m.L[j])<= plan_horizon:
-                return sum(m.on_off[j,h,k] for h in range(int(value(m.L[j])))) == 0
-            else:
-                return sum(m.on_off[j,h,k] for h in range(plan_horizon)) == 0
-        #m.minimum_off_con = Constraint(m.UNITS,m.SCENARIOS,rule = minimum_off_fun)
-
-        # minimum down time in the subsequent hours
-        def sub_minimum_dw_fun(m):
-            for j in m.UNITS:
-                for k in m.SCENARIOS:
-                    if value(m.L[j])<=0:
-                        low_bnd = 0
-                    else:
-                        low_bnd = int(value(m.L[j]))
-                    for h0 in range(low_bnd,plan_horizon-m.min_dw_time[j]+1):
-                        yield sum(1-m.on_off[j,h,k] for h in range(h0,h0 + m.min_dw_time[j]))\
-                        >= m.min_dw_time[j]* m.shut_dw[j,h0,k]
-        #m.sub_minimum_dw_con = ConstraintList(rule = sub_minimum_dw_fun)
-
-        # minimum down time in the final hours
-        def fin_minimum_dw_fun(m):
-            for j in m.UNITS:
-                for k in m.SCENARIOS:
-
-                    if plan_horizon < value(m.min_dw_time[j]):
-                        # if goes into here, sub_minimum_dw_con must have been
-                        # skipped.
-                        if value(m.L[j]) <= 0:
-                            # if goes into here, minimum_off_con must have been
-                            # skipped
-                            for h0 in range(0,plan_horizon):
-                                yield sum(1-m.on_off[j,h,k] - m.shut_dw[j,h0,k]\
-                                for h in range(h0,plan_horizon)) >=0
-                        else:
-                            for h0 in range(int(value(m.L[j])),plan_horizon):
-                                yield sum(1-m.on_off[j,h,k] - m.shut_dw[j,h0,k]\
-                                for h in range(h0,plan_horizon)) >=0
-
-                    else:
-                        for h0 in range(plan_horizon-m.min_dw_time[j]+1,plan_horizon):
-                            yield sum(1-m.on_off[j,h,k] - m.shut_dw[j,h0,k]\
-                            for h in range(h0,plan_horizon)) >=0
-        #m.fin_minimum_dw_con = ConstraintList(rule = fin_minimum_dw_fun)
-
-        try:
-            m.del_component(m.minimum_on_con)
-            m.del_component(m.sub_minimum_on_con)
-            m.del_component(m.fin_minimum_on_con)
-            m.del_component(m.minimum_off_con)
-            m.del_component(m.sub_minimum_dw_con)
-            m.del_component(m.fin_minimum_dw_con)
-            m.del_component(m.minimum_on_con_index)
-            m.del_component(m.sub_minimum_on_con_index)
-            m.del_component(m.fin_minimum_on_con_index)
-            m.del_component(m.minimum_off_con_index)
-            m.del_component(m.sub_minimum_dw_con_index)
-            m.del_component(m.fin_minimum_dw_con_index)
-            print("")
-            print('Old constraints have been removed.')
-            #return m
-        except:
-            print('The constraints may not have been constructed. Now I am constructing them.')
-            m.minimum_on_con = Constraint(m.UNITS,m.SCENARIOS,rule = minimum_on_fun)
-            m.sub_minimum_on_con = ConstraintList(rule = sub_minimum_on_fun)
-            m.fin_minimum_on_con = ConstraintList(rule = fin_minimum_on_fun)
-            m.minimum_off_con = Constraint(m.UNITS,m.SCENARIOS,rule = minimum_off_fun)
-            m.sub_minimum_dw_con = ConstraintList(rule = sub_minimum_dw_fun)
-            m.fin_minimum_dw_con = ConstraintList(rule = fin_minimum_dw_fun)
-        else:
-            m.minimum_on_con = Constraint(m.UNITS,m.SCENARIOS,rule = minimum_on_fun)
-            m.sub_minimum_on_con = ConstraintList(rule = sub_minimum_on_fun)
-            m.fin_minimum_on_con = ConstraintList(rule = fin_minimum_on_fun)
-            m.minimum_off_con = Constraint(m.UNITS,m.SCENARIOS,rule = minimum_off_fun)
-            m.sub_minimum_dw_con = ConstraintList(rule = sub_minimum_dw_fun)
-            m.fin_minimum_dw_con = ConstraintList(rule = fin_minimum_dw_fun)
-            print("")
-            print('Constraints have been reset successfully!')
 
         return
 

@@ -74,6 +74,7 @@ prescient.plugins.add_custom_commandline_option(opt)
 ### End add new command line options ###
 
 from strategic_bidding import DAM_thermal_bidding
+from tracking import DAM_thermal_tracking
 import pyomo.environ as pyo
 import dateutil.parser
 import numpy as np
@@ -96,14 +97,23 @@ def initialize_customized_results(options, simulator):
     return
 prescient.plugins.register_initialization_callback(initialize_customized_results)
 
-def initialize_customized_objects(options, simulator):
+def initialize_bidding_object(options, simulator):
 
     # initialize the model class
     thermal_bid = DAM_thermal_bidding(n_scenario=10)
     simulator.data_manager.extensions['thermal_bid'] = thermal_bid
 
     return
-prescient.plugins.register_initialization_callback(initialize_customized_objects)
+prescient.plugins.register_initialization_callback(initialize_bidding_object)
+
+def initialize_tracking_object(options, simulator):
+
+    # initialize the model class
+    thermal_track = DAM_thermal_tracking(n_scenario=10)
+    simulator.data_manager.extensions['thermal_track'] = thermal_track
+
+    return
+prescient.plugins.register_initialization_callback(initialize_tracking_object)
 
 '''
 def get_gpoints_gvalues(cost_curve_store_dir,date,gen_name = '102_STEAM_3',horizon = 24,verbose = False):

@@ -76,8 +76,12 @@ class DAM_thermal_bidding:
     n_scenario = 10
 
     def __init__(self,rts_gmlc_data_dir, generators = None):
+
         self.model_data = self.assemble_model_data(generator_names = generators, \
                                                    rts_gmlc_data_dir = rts_gmlc_data_dir)
+        self.model = self.build_thermal_bidding_model(plan_horizon = 48,
+                                                      segment_number = 4,
+                                                      n_scenario = 10)
 
     @staticmethod
     def assemble_model_data(generator_names, rts_gmlc_data_dir, **kwargs):

@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
 import copy
 import os
+from collections import deque
+from itertools import combinations
 
 class DAM_thermal_bidding:
 
@@ -56,359 +58,282 @@ class DAM_thermal_bidding:
     def __init__(self,n_scenario):
         self.n_scenario = n_scenario
 
-    # define the function
-    def DAM_thermal(self, plan_horizon=24,generator = None,n_scenario = None):
+    @staticmethod
+    def _add_UT_DT_constraints(m):
 
-        '''
-        Input:
-        1. plan_horizon: length of the planning horizon
-        2. n_scenario: number of scenarios in DAM
-        3. n_seg: number of segments needed to approx the cost function
+        def pre_shut_down_trajectory_set_rule(m):
+            return ((j,t) for j in m.UNITS for t in range(-pyo.value(m.min_dw_time[j]) + 1,0))
+        m.pre_shut_down_trajectory_set = pyo.Set(dimen = 2,initialize = pre_shut_down_trajectory_set_rule, ordered = True)
 
-        '''
+        def pre_start_up_trajectory_set_rule(m):
+            return ((j,t) for j in m.UNITS for t in range(-pyo.value(m.min_up_time[j]) + 1,0))
+        m.pre_start_up_trajectory_set = pyo.Set(dimen = 2,initialize = pre_start_up_trajectory_set_rule, ordered = True)
 
-        if n_scenario == None:
-            n_scenario = self.n_scenario
+        m.pre_shut_down_trajectory = pyo.Param(m.pre_shut_down_trajectory_set, initialize = 0, mutable = True)
+        m.pre_start_up_trajectory = pyo.Param(m.pre_start_up_trajectory_set, initialize = 0, mutable = True)
 
-        ## build the model
-        m = ConcreteModel()
+        def min_down_time_rule(m,j,h,k):
+            if h < pyo.value(m.min_dw_time[j]):
+                return sum(m.pre_shut_down_trajectory[j,h0] for h0 in range(h - pyo.value(m.min_dw_time[j]) + 1,0)) \
+                       + sum(m.shut_dw[j,h0,k] for h0 in range(h + 1)) <= 1 - m.on_off[j,h,k]
+            else:
+                return sum(m.shut_dw[j,h0,k] for h0 in range(h - pyo.value(m.min_dw_time[j]) + 1, h + 1)) <= 1 - m.on_off[j,h,k]
+        m.min_down_time_con = pyo.Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = min_down_time_rule)
+
+        def min_up_time_rule(m,j,h,k):
+            if h < pyo.value(m.min_up_time[j]):
+                return sum(m.pre_start_up_trajectory[j,h0] for h0 in range(h - pyo.value(m.min_up_time[j]) + 1,0)) \
+                       + sum(m.start_up[j,h0,k] for h0 in range(h + 1)) <= m.on_off[j,h,k]
+            else:
+                return sum(m.start_up[j,h0,k] for h0 in range(h - pyo.value(m.min_up_time[j]) + 1, h + 1)) <= m.on_off[j,h,k]
+        m.min_up_time_con = pyo.Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = min_up_time_rule)
+
+        return
+
+    def build_thermal_bidding_model(self,model_data,\
+                                    plan_horizon = 48,\
+                                    segment_number = 4,\
+                                    n_scenario = 10):
+
+        m = pyo.ConcreteModel()
 
         ## define the sets
-        m.HOUR = Set(initialize = range(plan_horizon))
-
+        m.HOUR = pyo.Set(initialize = range(plan_horizon))
+        m.SEGMENTS = pyo.Set(initialize = range(1, segment_number))
+        m.UNITS = pyo.Set(initialize = model_data['Generator'], ordered = True)
         m.SCENARIOS = Set(initialize = range(n_scenario))
-        m.SEGMENTS = Set(initialize = range(len(self.power_increae[self.gen_name[0]])))
-        #m.SEGMENTS_bid = Set(initialize = range(self.n_seg))
-
-        # the set for the genration units
-        if generator == None:
-            m.UNITS = Set(initialize = self.gen_name,ordered = True)
-        else:
-            m.UNITS = Set(initialize = [generator],ordered = True)
 
         ## define the parameters
 
-        # DAM price forecasts
-        m.DAM_price = Param(m.HOUR,m.SCENARIOS,initialize = 20, mutable = True)
+        # add power schedule as a Param
+        m.power_dispatch = pyo.Param(m.UNITS,m.HOUR, initialize = 0, mutable = True)
 
-        start_cost_dict = {i:self.start_cost[i] for i in m.UNITS}
-        m.start_up_cost = Param(m.UNITS,initialize = start_cost_dict,mutable = False)
+        m.DAM_price = pyo.Param(m.HOUR,m.SCENARIOS,initialize = 20, mutable = True)
 
-        #fix_cost_dollar_dict = {i: self.fix_cost_dollar[i] for i in m.UNITS}
-        #m.fix_cost = Param(m.UNITS,initialize = 0,mutable = False)
-
-        # production cost
-        prod_cost_dict = {(i,l):self.prod_cost[i][l] for i in m.UNITS for l in m.SEGMENTS}
-        m.prod_cost = Param(m.UNITS,m.SEGMENTS,initialize = prod_cost_dict,mutable = False)
+        m.start_up_cost = pyo.Param(m.UNITS,initialize = model_data['SU Cost'],mutable = False)
 
         # capacity of generators: upper bound (MW)
-        capacity_dict = {i: self.capacity[i] for i in m.UNITS}
-        m.gen_cap = Param(m.UNITS,initialize = capacity_dict, mutable = True)
+        m.Pmax = pyo.Param(m.UNITS,initialize = model_data['Pmax'], mutable = False)
 
         # minimum power of generators: lower bound (MW)
-        min_pow_dict = {i: self.min_pow[i] for i in m.UNITS}
-        m.gen_min_pow = Param(m.UNITS,initialize = min_pow_dict, mutable = True)
+        m.Pmin = pyo.Param(m.UNITS,initialize = model_data['Pmin'], mutable = False)
 
-        def seg_len_rule(m,j,l):
-            return self.power_increae[j][l]
-        #m.seg_len = Param(m.UNITS,m.SEGMENTS,initialize = seg_len_rule, mutable = False)
+        m.power_segment_bounds = pyo.Param(m.UNITS,m.SEGMENTS,initialize = model_data['Power Segments'], mutable = False)
+
+        # get the cost slopes
+        m.F = pyo.Param(m.UNITS,m.SEGMENTS,initialize = model_data['Marginal Costs'], mutable = False)
+
+        m.min_load_cost = pyo.Param(m.UNITS,initialize = model_data['Min Load Cost'], mutable = False)
 
         # Ramp up limits (MW/h)
-        ramp_up_dict = {i:self.ramp_up[i] for i in m.UNITS}
-        m.ramp_up = Param(m.UNITS,initialize = ramp_up_dict,mutable = True)
+        m.ramp_up = pyo.Param(m.UNITS,initialize = model_data['RU'], mutable = False)
 
         # Ramp down limits (MW/h)
-        ramp_dw_dict = {i:self.ramp_dw[i] for i in m.UNITS}
-        m.ramp_dw = Param(m.UNITS,initialize = ramp_dw_dict,mutable = True)
+        m.ramp_dw = pyo.Param(m.UNITS,initialize = model_data['RD'], mutable = False)
 
         # start up ramp limit
-        ramp_start_up_dict = {i:self.ramp_start_up[i] for i in m.UNITS}
-        m.ramp_start_up = Param(m.UNITS,initialize = ramp_start_up_dict)
+        m.ramp_start_up = pyo.Param(m.UNITS,initialize = model_data['SU'], mutable = False)
 
         # shut down ramp limit
-        ramp_shut_dw_dict = {i:self.ramp_shut_dw[i] for i in m.UNITS}
-        m.ramp_shut_dw = Param(m.UNITS,initialize = ramp_shut_dw_dict)
+        m.ramp_shut_dw = pyo.Param(m.UNITS,initialize = model_data['SD'], mutable = False)
 
         # minimum down time [hr]
-        min_dw_time_dict = {i:self.min_dw_time[i] for i in m.UNITS}
-        m.min_dw_time = Param(m.UNITS,initialize = min_dw_time_dict)
+        m.min_dw_time = pyo.Param(m.UNITS,initialize = model_data['DT'], mutable = False)
 
         # minimum up time [hr]
-        min_up_time_dict = {i:self.min_up_time[i] for i in m.UNITS}
-        m.min_up_time = Param(m.UNITS,initialize = min_up_time_dict)
+        m.min_up_time = pyo.Param(m.UNITS,initialize = model_data['UT'], mutable = False)
 
         # power from the previous day (MW)
         # need to assume the power output is at least always at the minimum pow output
 
         # on/off status from previous day
-        m.pre_on_off = Param(m.UNITS,within = Binary,default= 1,mutable = True)
-
-        # number of hours the plant has been on/off in the previous day
-        m.pre_up_hour = Param(m.UNITS,within = Integers,initialize = 24,mutable = True)
-        m.pre_dw_hour = Param(m.UNITS,within = Integers,initialize = 0, mutable = True)
+        m.pre_on_off = pyo.Param(m.UNITS,within = pyo.Binary,default= 1,mutable = True)
 
         # define a function to initialize the previous power params
         def init_pre_pow_fun(m,j):
-            return m.pre_on_off[j]*m.gen_min_pow[j]
-        m.pre_pow = Param(m.UNITS,initialize = init_pre_pow_fun, mutable = True)
-        #m.pre_pow = Expression(m.UNITS,rule = init_pre_pow_fun)
+            return m.pre_on_off[j]*m.Pmin[j]
+        m.pre_P_T = pyo.Param(m.UNITS,initialize = init_pre_pow_fun, mutable = True)
 
         ## define the variables
 
         # generator power (MW)
-        m.gen_pow = Var(m.UNITS,m.HOUR,m.SCENARIOS,within = NonNegativeReals)
 
-        # generator energy (MWh)
-        m.gen_eng = Var(m.UNITS,m.HOUR,m.SCENARIOS,within = NonNegativeReals)
+        # power generated by thermal generator
+        m.P_T = pyo.Var(m.UNITS,m.HOUR,m.SCENARIOS,within = pyo.NonNegativeReals)
 
         # binary variables indicating on/off
-        m.on_off = Var(m.UNITS,m.HOUR,m.SCENARIOS,initialize = True,within = Binary)
+        m.on_off = pyo.Var(m.UNITS,m.HOUR,m.SCENARIOS,initialize = True, within = pyo.Binary)
 
         # binary variables indicating  start_up
-        m.start_up = Var(m.UNITS,m.HOUR,m.SCENARIOS,initialize = False,within = Binary)
+        m.start_up = pyo.Var(m.UNITS,m.HOUR,m.SCENARIOS,initialize = False, within = pyo.Binary)
 
         # binary variables indicating shut down
-        m.shut_dw = Var(m.UNITS,m.HOUR,m.SCENARIOS,initialize = False, within = Binary)
+        m.shut_dw = pyo.Var(m.UNITS,m.HOUR,m.SCENARIOS,initialize = False, within = pyo.Binary)
 
         # power produced in each segment
-        m.power_segment = Var(m.UNITS,m.HOUR,m.SCENARIOS,m.SEGMENTS,within = NonNegativeReals)
+        m.power_segment = pyo.Var(m.UNITS,m.HOUR,m.SEGMENTS, m.SCENARIOS, within = pyo.NonNegativeReals)
 
         ## Constraints
 
-        # energy-power relation
-        def eng_pow_fun(m,j,h,k):
-            '''
-            j,h,k stand for unit, hour,scenario respectively.
-            '''
-            if h == 0:
-                return m.gen_eng[j,h,k] == (m.pre_pow[j] + m.gen_pow[j,h,k])/2
-            else:
-                return m.gen_eng[j,h,k] == (m.gen_pow[j,h-1,k] + m.gen_pow[j,h,k])/2
-        def eng_pow_fun2(m,j,h,k):
-            return m.gen_eng[j,h,k] == m.gen_pow[j,h,k]
-        m.eng_pow_con = Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = eng_pow_fun2)
+        # bounds on gen_pow
+        def lhs_bnd_gen_pow_fun(m,j,h,k):
+            return m.on_off[j,h,k] * m.Pmin[j] <= m.P_T[j,h,k]
+        m.lhs_bnd_gen_pow = pyo.Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = lhs_bnd_gen_pow_fun)
+
+        def rhs_bnd_gen_pow_fun(m,j,h):
+            return m.P_T[j,h,k] <= m.on_off[j,h,k] * m.Pmax[j]
+        m.rhs_bnd_gen_pow = pyo.Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = rhs_bnd_gen_pow_fun)
 
         # linearized power
         def linear_power_fun(m,j,h,k):
-            return m.gen_pow[j,h,k] == \
-            sum(m.power_segment[j,h,k,l] for l in m.SEGMENTS)
-        m.linear_power = Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = linear_power_fun)
+            return m.P_T[j,h,k] == \
+            sum(m.power_segment[j,h,l,k] for l in m.SEGMENTS) + m.Pmin[j]*m.on_off[j,h,k]
+        m.linear_power = pyo.Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = linear_power_fun)
 
         # bounds on segment power
-        def seg_pow_bnd_fun(m):
-            for j in m.UNITS:
-                for h in m.HOUR:
-                    for k in m.SCENARIOS:
-                        for l in m.SEGMENTS:
-                            yield m.power_segment[j,h,k,l]<= self.power_increae[j][l]
-        m.seg_pow_bnd = ConstraintList(rule = seg_pow_bnd_fun)
+        def seg_pow_bnd_fun(m,j,h,l,k):
+            if l == 1:
+                return m.power_segment[j,h,l,k]<= (m.power_segment_bounds[j,l] - m.Pmin[j]) * m.on_off[j,h,k]
+            else:
+                return m.power_segment[j,h,l,k]<= (m.power_segment_bounds[j,l] - m.power_segment_bounds[j,l-1]) * m.on_off[j,h,k]
+        m.seg_pow_bnd = pyo.Constraint(m.UNITS,m.HOUR,m.SEGMENTS,m.SCENARIOS,rule = seg_pow_bnd_fun)
 
         # start up and shut down logic (Arroyo and Conejo 2000)
         def start_up_shut_dw_fun(m,j,h,k):
             if h == 0:
-                return m.start_up[j,h,k] - m.shut_dw[j,h,k] == m.on_off[j,h,k] -\
-                m.pre_on_off[j]
+                return m.start_up[j,h,k] - m.shut_dw[j,h,k] == m.on_off[j,h,k] - m.pre_on_off[j]
             else:
-                return m.start_up[j,h,k] - m.shut_dw[j,h,k] == m.on_off[j,h,k] -\
-                m.on_off[j,h-1,k]
-        m.start_up_shut_dw = Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = \
-        start_up_shut_dw_fun)
+                return m.start_up[j,h,k] - m.shut_dw[j,h,k] == m.on_off[j,h,k] - m.on_off[j,h-1,k]
+        m.start_up_shut_dw = pyo.Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = start_up_shut_dw_fun)
 
         # either start up or shut down
         def start_up_or_shut_dw_fun(m,j,h,k):
             return m.start_up[j,h,k] + m.shut_dw[j,h,k] <= 1
-        m.start_up_or_shut_dw = Constraint(m.UNITS,m.HOUR,m.SCENARIOS,\
-        rule = start_up_or_shut_dw_fun)
-
-        # bounds on gen_pow
-        def lhs_bnd_gen_pow_fun(m,j,h,k):
-            return m.on_off[j,h,k] * m.gen_min_pow[j] <= m.gen_pow[j,h,k]
-        m.lhs_bnd_gen_pow = Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = lhs_bnd_gen_pow_fun)
-
-        def rhs_bnd_gen_pow_fun(m,j,h,k):
-            return m.gen_pow[j,h,k] <= m.on_off[j,h,k] * m.gen_cap[j]
-        m.rhs_bnd_gen_pow = Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = rhs_bnd_gen_pow_fun)
+        m.start_up_or_shut_dw = pyo.Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = start_up_or_shut_dw_fun)
 
         # ramp up limits
         def ramp_up_fun(m,j,h,k):
             '''
-            j,h,k stand for unit, hour,scenario respectively.
+            j,h stand for unit, hour,scenario respectively.
             '''
             if h==0:
-                return m.gen_pow[j,h,k] <= m.pre_pow[j] \
+                return m.P_T[j,h,k] <= m.pre_P_T[j] \
                 + m.ramp_up[j]*m.pre_on_off[j]\
-                + m.ramp_start_up[j]*m.start_up[j,h,k]\
-                + m.gen_cap[j]*(1-m.on_off[j,h,k])
+                + m.ramp_start_up[j]*m.start_up[j,h,k]
             else:
-                return m.gen_pow[j,h,k] <= m.gen_pow[j,h-1,k] \
+                return m.P_T[j,h,k] <= m.P_T[j,h-1,k] \
                 + m.ramp_up[j]*m.on_off[j,h-1,k]\
-                + m.ramp_start_up[j]*m.start_up[j,h,k]\
-                + m.gen_cap[j]*(1-m.on_off[j,h,k])
-        m.ramp_up_con = Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = ramp_up_fun)
+                + m.ramp_start_up[j]*m.start_up[j,h,k]
+        m.ramp_up_con = pyo.Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = ramp_up_fun)
 
         # ramp shut down limits
         def ramp_shut_dw_fun(m,j,h,k):
             '''
-            j,h,k stand for unit, hour,scenario respectively.
+            j,h stand for unit, hour,scenario respectively.
             '''
             if h==0:
-                return m.pre_pow[j] <= m.gen_cap[j]*m.on_off[j,h,k] \
-                + m.ramp_shut_dw[j] * m.shut_dw[j,h,k]
+                return m.pre_P_T[j] <= m.Pmax[j]*m.on_off[j,h,k] + m.ramp_shut_dw[j] * m.shut_dw[j,h,k]
             else:
-                return m.gen_pow[j,h-1,k] <= m.gen_cap[j]*m.on_off[j,h,k] \
-                + m.ramp_shut_dw[j] * m.shut_dw[j,h,k]
-        m.ramp_shut_dw_con = Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = ramp_shut_dw_fun)
+                return m.P_T[j,h-1,k] <= m.Pmax[j]*m.on_off[j,h,k] + m.ramp_shut_dw[j] * m.shut_dw[j,h,k]
+        m.ramp_shut_dw_con = pyo.Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = ramp_shut_dw_fun)
 
         # ramp down limits
         def ramp_dw_fun(m,j,h,k):
             '''
-            j,h,k stand for unit, hour,scenario respectively.
+            j,h stand for unit, hour,scenario respectively.
             '''
             if h == 0:
-                return m.pre_pow[j] - m.gen_pow[j,h,k] <= m.ramp_dw[j] * m.on_off[j,h,k]\
-                + m.ramp_shut_dw[j] * m.shut_dw[j,h,k]\
-                + m.gen_cap[j] * (1 - m.pre_on_off[j])
+                return m.pre_P_T[j] - m.P_T[j,h,k] <= m.ramp_dw[j] * m.on_off[j,h,k]\
+                + m.ramp_shut_dw[j] * m.shut_dw[j,h]
             else:
-                return m.gen_pow[j,h-1,k] - m.gen_pow[j,h,k] <= m.ramp_dw[j] * m.on_off[j,h,k]\
-                + m.ramp_shut_dw[j] * m.shut_dw[j,h,k]\
-                + m.gen_cap[j] * (1 - m.on_off[j,h-1,k])
-        m.ramp_dw_con = Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = ramp_dw_fun)
+                return m.P_T[j,h-1,k] - m.P_T[j,h,k] <= m.ramp_dw[j] * m.on_off[j,h,k]\
+                + m.ramp_shut_dw[j] * m.shut_dw[j,h,k]
+        m.ramp_dw_con = pyo.Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = ramp_dw_fun)
 
-        # expressions for min up/down time
-        def G_expr(m,j):
-            # temp = max(0,value(m.min_up_time[j]-m.pre_up_hour[j]))
-            # return min(plan_horizon,temp*value(m.pre_on_off[j]))
-            return (m.min_up_time[j]-m.pre_up_hour[j])*m.pre_on_off[j]
-        m.G = Expression(m.UNITS,rule = G_expr)
+        ## add min up and down time constraints
+        self._add_UT_DT_constraints(m)
 
-        def L_expr(m,j):
-            # temp = max(0,value(m.min_dw_time[j]-m.pre_dw_hour[j]))
-            # return min(plan_horizon,temp*(1-value(m.pre_on_off[j])))
-            return (m.min_dw_time[j]-m.pre_dw_hour[j])*(1-m.pre_on_off[j])
-        m.L = Expression(m.UNITS,rule = L_expr)
 
-        ## min up time constraints
-        def minimum_on_fun(m,j,k):
-            if value(m.G[j]) <= 0:
-                return Constraint.Skip
-            elif 0<value(m.G[j])<= plan_horizon:
-                return sum(1-m.on_off[j,h,k] for h in range(int(value(m.G[j])))) == 0
-            else:
-                return sum(1-m.on_off[j,h,k] for h in range(plan_horizon)) == 0
-        m.minimum_on_con = Constraint(m.UNITS,m.SCENARIOS,rule = minimum_on_fun)
-
-        # minimum up time in the subsequent hours
-        def sub_minimum_on_fun(m):
-            for j in m.UNITS:
-                for k in m.SCENARIOS:
-                    if value(m.G[j])<=0:
-                        low_bnd = 0
-                    else:
-                        low_bnd = int(value(m.G[j]))
-                    for h0 in range(low_bnd,plan_horizon-m.min_up_time[j]+1):
-                        yield sum(m.on_off[j,h,k] for h in range(h0,h0 + m.min_up_time[j]))\
-                        >= m.min_up_time[j]*m.start_up[j,h0,k]
-        m.sub_minimum_on_con = ConstraintList(rule = sub_minimum_on_fun)
-
-        # minimum up time in the final hours
-        def fin_minimum_on_fun(m):
-            for j in m.UNITS:
-                for k in m.SCENARIOS:
-
-                    if plan_horizon < value(m.min_up_time[j]):
-                        # if goes into here, sub_minimum_on_con must have been
-                        # skipped.
-                        if value(m.G[j]) <= 0:
-                            # if goes into here, minimum_on_con must have been
-                            # skipped
-                            for h0 in range(0,plan_horizon):
-                                yield sum(m.on_off[j,h,k] - m.start_up[j,h0,k] \
-                                for h in range(h0,plan_horizon)) >=0
-
-                        else:
-                            for h0 in range(int(value(m.G[j])),plan_horizon):
-                                yield sum(m.on_off[j,h,k] - m.start_up[j,h0,k] \
-                                for h in range(h0,plan_horizon)) >=0
-
-                    else:
-                        for h0 in range(plan_horizon-m.min_up_time[j]+1,plan_horizon):
-                            yield sum(m.on_off[j,h,k] - m.start_up[j,h0,k] \
-                            for h in range(h0,plan_horizon)) >=0
-        m.fin_minimum_on_con = ConstraintList(rule = fin_minimum_on_fun)
-
-        ## min down time constraints
-        def minimum_off_fun(m,j,k):
-            if value(m.L[j])<= 0:
-                return Constraint.Skip
-            elif 0<value(m.L[j])<= plan_horizon:
-                return sum(m.on_off[j,h,k] for h in range(int(value(m.L[j])))) == 0
-            else:
-                return sum(m.on_off[j,h,k] for h in range(plan_horizon)) == 0
-        m.minimum_off_con = Constraint(m.UNITS,m.SCENARIOS,rule = minimum_off_fun)
-
-        # minimum down time in the subsequent hours
-        def sub_minimum_dw_fun(m):
-            for j in m.UNITS:
-                for k in m.SCENARIOS:
-                    if value(m.L[j])<=0:
-                        low_bnd = 0
-                    else:
-                        low_bnd = int(value(m.L[j]))
-                    for h0 in range(low_bnd,plan_horizon-m.min_dw_time[j]+1):
-                        yield sum(1-m.on_off[j,h,k] for h in range(h0,h0 + m.min_dw_time[j]))\
-                        >= m.min_dw_time[j]* m.shut_dw[j,h0,k]
-        m.sub_minimum_dw_con = ConstraintList(rule = sub_minimum_dw_fun)
-
-        # minimum down time in the final hours
-        def fin_minimum_dw_fun(m):
-            for j in m.UNITS:
-                for k in m.SCENARIOS:
-
-                    if plan_horizon < value(m.min_dw_time[j]):
-                        # if goes into here, sub_minimum_dw_con must have been
-                        # skipped.
-                        if value(m.L[j]) <= 0:
-                            # if goes into here, minimum_off_con must have been
-                            # skipped
-                            for h0 in range(0,plan_horizon):
-                                yield sum(1-m.on_off[j,h,k] - m.shut_dw[j,h0,k]\
-                                for h in range(h0,plan_horizon)) >=0
-                        else:
-                            for h0 in range(int(value(m.L[j])),plan_horizon):
-                                yield sum(1-m.on_off[j,h,k] - m.shut_dw[j,h0,k]\
-                                for h in range(h0,plan_horizon)) >=0
-
-                    else:
-                        for h0 in range(plan_horizon-m.min_dw_time[j]+1,plan_horizon):
-                            yield sum(1-m.on_off[j,h,k] - m.shut_dw[j,h0,k]\
-                            for h in range(h0,plan_horizon)) >=0
-        m.fin_minimum_dw_con = ConstraintList(rule = fin_minimum_dw_fun)
+        ## add bidding constraints
+        self._add_bidding_constraints(m)
 
         ## Expression
-        # energy generated by all the units
-        def total_eng_fun(m,h,k):
-            return sum(m.gen_eng[j,h,k] for j in m.UNITS)
-        m.tot_eng = Expression(m.HOUR,m.SCENARIOS,rule = total_eng_fun)
 
-        def prod_cost_approx_fun(m,j,h,k):
-            return m.prod_cost[j,0]*m.gen_min_pow[j]*m.on_off[j,h,k]\
-            +sum(m.prod_cost[j,l]*m.power_segment[j,h,k,l] for l in range(1,len(m.SEGMENTS)))
-        m.prod_cost_approx = Expression(m.UNITS,m.HOUR,m.SCENARIOS,\
-        rule = prod_cost_approx_fun)
+        def prod_cost_fun(m,j,h,k):
+            return m.min_load_cost[j] * m.on_off[j,h,k] \
+            + sum(m.F[j,l]*m.power_segment[j,h,l,k] for l in m.SEGMENTS)
+        m.prod_cost_approx = pyo.Expression(m.UNITS,m.HOUR,m.SCENARIOS,rule = prod_cost_fun)
+
+        # start up costs
+        def start_cost_fun(m,j,h):
+            return m.start_up_cost[j]*m.start_up[j,h,k]
+        m.start_up_cost_expr = pyo.Expression(m.UNITS,m.HOUR,m.SCENARIOS,rule = start_cost_fun)
 
         # total cost
-        def tot_cost_fun(m,h,k):
-            return sum(m.prod_cost_approx[j,h,k]\
-            + m.start_up_cost[j]*m.start_up[j,h,k] for j in m.UNITS)
-        m.tot_cost = Expression(m.HOUR,m.SCENARIOS,rule = tot_cost_fun)
+        def tot_cost_fun(m,j,h,k):
+            return m.prod_cost_approx[j,h,k] + m.start_up_cost_expr[j,h,k]
+        m.tot_cost = pyo.Expression(m.UNITS,m.HOUR,m.SCENARIOS,rule = tot_cost_fun)
 
         ## Objective
         def exp_revenue_fun(m):
-            return sum(m.tot_eng[h,k]*m.DAM_price[h,k]- m.tot_cost[h,k]\
-            for h in m.HOUR for k in m.SCENARIOS)/n_scenario
-        m.exp_revenue = Objective(rule = exp_revenue_fun,sense = maximize)
+            return sum(m.P_T[j,h,k]*m.DAM_price[h,k]- m.tot_cost[j,h,k] for h in m.HOUR for j in m.UNITS for k in m.SCENARIOS)
+        m.exp_revenue = pyo.Objective(rule = exp_revenue_fun,sense = pyo.maximize)
 
         return m
+
+    @staticmethod
+    def _update_UT_DT(m,implemented_shut_down, implemented_start_up):
+        '''
+        implemented_shut_down: {unit: []}
+        implemented_start_up: {unit: []}
+        '''
+
+        # copy to a queue
+        pre_shut_down_trajectory_copy = {}
+        pre_start_up_trajectory_copy = {}
+
+        for unit in m.UNITS:
+            pre_shut_down_trajectory_copy[unit] = deque([])
+            pre_start_up_trajectory_copy[unit] = deque([])
+
+        for unit,t in m.pre_shut_down_trajectory_set:
+            pre_shut_down_trajectory_copy[unit].append(round(pyo.value(m.pre_shut_down_trajectory[unit,t])))
+        for unit,t in m.pre_start_up_trajectory_set:
+            pre_start_up_trajectory_copy[unit].append(round(pyo.value(m.pre_start_up_trajectory[unit,t])))
+
+        # add implemented trajectory to the queue
+        for unit in m.UNITS:
+            pre_shut_down_trajectory_copy[unit] += deque(implemented_shut_down[unit])
+            pre_start_up_trajectory_copy[unit] += deque(implemented_start_up[unit])
+
+        # pop out outdated trajectory
+        for unit in m.UNITS:
+
+            while len(pre_shut_down_trajectory_copy[unit]) > pyo.value(m.min_dw_time[unit]) - 1:
+                pre_shut_down_trajectory_copy[unit].popleft()
+            while len(pre_start_up_trajectory_copy[unit]) > pyo.value(m.min_up_time[unit]) - 1:
+                pre_start_up_trajectory_copy[unit].popleft()
+
+        # actual update
+        for unit,t in m.pre_shut_down_trajectory_set:
+            m.pre_shut_down_trajectory[unit,t] = pre_shut_down_trajectory_copy[unit].popleft()
+
+        for unit,t in m.pre_start_up_trajectory_set:
+            m.pre_start_up_trajectory[unit,t] = pre_start_up_trajectory_copy[unit].popleft()
+
+        return
+
+    @staticmethod
+    def _update_power(m,implemented_power_output):
+        '''
+        implemented_power_output: {unit: []}
+        '''
+
+        for unit in m.UNITS:
+            m.pre_P_T[unit] = round(implemented_power_output[unit][-1],2)
+            m.pre_on_off[unit] = round(int(implemented_power_output[unit][-1] > 1e-3))
+
+        return
 
     # define the function
     def DAM_hybrid(self,plan_horizon=24,generator = None,n_scenario = None, storage_size = 4, storage_eff = 0.88):
@@ -940,7 +865,7 @@ class DAM_thermal_bidding:
 
     # define a function to add bidding constraints to models
     @staticmethod
-    def add_bidding_constraints(m,NA_con_range = 2):
+    def _add_bidding_constraints(m,NA_con_range = 24):
 
         '''
         This function takes the thermal model and add bidding cosntraints
@@ -951,8 +876,6 @@ class DAM_thermal_bidding:
         output instead of power output.
         '''
 
-        from itertools import combinations
-
         # generate scenarios combinations
         scenario_comb = combinations(m.SCENARIOS,2)
 
@@ -961,11 +884,11 @@ class DAM_thermal_bidding:
             for k in scenario_comb:
                 for j in m.UNITS:
                     for h in range(NA_con_range):
-                        yield (m.gen_pow[j,h,k[0]] - m.gen_pow[j,h,k[1]])\
+                        yield (m.P_T[j,h,k[0]] - m.P_T[j,h,k[1]])\
                         *(m.DAM_price[h,k[0]] - m.DAM_price[h,k[1]]) >= 0
         m.bidding_con1 = ConstraintList(rule = bidding_con_fun1)
 
-        return m
+        return
 
     # define a function to extract power ouput for a hour
     @staticmethod

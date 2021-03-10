@@ -71,6 +71,22 @@ opt = Option('--cost-weight',
              default=1)
 prescient.plugins.add_custom_commandline_option(opt)
 
+opt = Option('--rts_gmlc_data_dir',
+             help="the relative path to rts gmlc data set",
+             action='store',
+             dest='rts_gmlc_data_dir',
+             type='str',
+             default='./RTS-GMLC/RTS_Data/SourceData/')
+prescient.plugins.add_custom_commandline_option(opt)
+
+opt = Option('--price_forecast_dir',
+             help="the relative path to price forecasts",
+             action='store',
+             dest='price_forecast_dir',
+             type='str',
+             default='../../prescient/plugins/price_forecasts/')
+prescient.plugins.add_custom_commandline_option(opt)
+
 ### End add new command line options ###
 
 from strategic_bidding import DAM_thermal_bidding
@@ -100,36 +116,61 @@ prescient.plugins.register_initialization_callback(initialize_customized_results
 def initialize_bidding_object(options, simulator):
 
     # initialize the model class
-    thermal_bid = DAM_thermal_bidding(n_scenario=10)
+    thermal_bid = DAM_thermal_bidding(rts_gmlc_data_dir = options.rts_gmlc_data_dir, \
+                                      price_forecast_dir = options.price_forecast_dir,\
+                                      generators = [options.bidding_generator])
     simulator.data_manager.extensions['thermal_bid'] = thermal_bid
 
     return
 prescient.plugins.register_initialization_callback(initialize_bidding_object)
 
-def initialize_tracking_object(options, simulator):
+# def initialize_tracking_object(options, simulator):
+#
+#     # initialize the model class
+#     thermal_track = DAM_thermal_tracking(n_scenario=10)
+#     simulator.data_manager.extensions['thermal_track'] = thermal_track
+#
+#     return
+# prescient.plugins.register_initialization_callback(initialize_tracking_object)
 
-    # initialize the model class
-    thermal_track = DAM_thermal_tracking(n_scenario=10)
-    simulator.data_manager.extensions['thermal_track'] = thermal_track
+def pass_bid_to_prescient(options, ruc_instance, ruc_date, bids):
+
+    gen_name = options.bidding_generator
+    gen_dict = ruc_instance.data['elements']['generator'][gen_name]
+    p_cost = [list(bids[t][gen_name].items()) for t in range(options.ruc_horizon)]
+
+    gen_dict['p_cost'] = {'data_type': 'time_series',
+                          'values': [{'data_type' : 'cost_curve',
+                                     'cost_curve_type':'piecewise',
+                                     'values':p_cost[t]} for t in range(options.ruc_horizon)]
+                         }
 
     return
-prescient.plugins.register_initialization_callback(initialize_tracking_object)
 
 def bid_into_DAM(options, simulator, ruc_instance, ruc_date, ruc_hour):
 
-    ## TODO: make sure the model is updated
+    # check if it is first day
+    is_first_day = simulator.time_manager.current_time is None
 
+    if not is_first_day:
+        # TODO: update the model based on tracking model
+        pass
 
     thermal_bid = simulator.data_manager.extensions['thermal_bid']
 
     # generate bids
-    thermal_bid.stochastic_bidding(thermal_bid.model,ruc_date)
+    bids = thermal_bid.stochastic_bidding(ruc_date)
+    if is_first_day:
+        simulator.data_manager.extensions['current_bids'] = bids
+        simulator.data_manager.extensions['next_bids'] = bids
+    else:
+        simulator.data_manager.extensions['next_bids'] = bids
 
     # pass to prescient
-    thermal_bid.pass_bid_to_prescient(options, simulator, ruc_instance, ruc_date, ruc_hour)
+    pass_bid_to_prescient(options, ruc_instance, ruc_date, bids)
 
     # record bids
-    thermal_bid.record_bids()
+    # thermal_bid.record_bids()
 
     return
 prescient.plugins.register_before_ruc_solve_callback(bid_into_DAM)
@@ -153,6 +194,7 @@ prescient.plugins.register_after_operations_callback(track_sced_signal)
 
 def update_observed_thermal_dispatch(options, simulator, ops_stats):
 
+    '''
     current_time = simulator.time_manager.current_time
     h = current_time.hour
     date_as_string = current_time.date
@@ -169,14 +211,20 @@ def update_observed_thermal_dispatch(options, simulator, ops_stats):
         print('Making changes in observed power output using tracking SCED model.')
         g = options.bidding_generator
         ops_stats.observed_thermal_dispatch_levels[g] = total_power_delivered_arr[h,date_idx]
-
+    '''
+    pass
 prescient.plugins.register_update_operations_stats_callback(update_observed_thermal_dispatch)
 
 
 def after_ruc_activation(options, simulator):
 
-    # change the ruc plan in tracking object
-    pass
+    # TODO: change the ruc plan in tracking object
+
+    # change bids
+    current_bids = simulator.data_manager.extensions['next_bids']
+    simulator.data_manager.extensions['current_bids'] = current_bids
+    simulator.data_manager.extensions['next_bids'] = None
+    return
 prescient.plugins.register_after_ruc_activation_callback(after_ruc_activation)
 
 def write_customize_results(options, simulator):

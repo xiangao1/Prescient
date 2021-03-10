@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pyomo.environ as pyo
 import os
-from collections import deque
+from collections import deque, OrderedDict
 from itertools import combinations
 
 def get_data_given(df, bus=None, date=None, hour=None, generator=None, fuel_type=None):
@@ -144,7 +144,7 @@ class DAM_thermal_bidding:
         # get the original cost curve
         model_data['Original Cost Curve'] = {}
         for gen in generator_names:
-            model_data['Original Cost Curve'][gen] = {}
+            model_data['Original Cost Curve'][gen] = OrderedDict()
 
             pmin = round(model_data['Pmin'][gen],2)
             model_data['Original Cost Curve'][gen][pmin] = model_data['Min Load Cost'][gen]
@@ -162,15 +162,21 @@ class DAM_thermal_bidding:
                 old_cost += increased_cost
                 old_p = new_p
 
+        model_data['Original Marginal Cost Curve'] = {}
+        for gen in generator_names:
+            model_data['Original Marginal Cost Curve'][gen] = OrderedDict()
+
+            pmin = round(model_data['Pmin'][gen],2)
+            model_data['Original Marginal Cost Curve'][gen][pmin] = model_data['Min Load Cost'][gen]/pmin
+
+            for l in range(1,4):
+                new_p = round(model_data['Power Segments'][(gen,l)],2)
+                model_data['Original Marginal Cost Curve'][gen][new_p] = model_data['Marginal Costs'][(gen,l)]
+
         for key in kwargs:
             model_data[key] = {gen: kwargs[key] for gen in generator_names}
 
         return model_data
-
-    def get_original_cost_curve(self):
-        original_cost_curve = {}
-        for gen in self.model_data['Generator']:
-            pass
 
     @staticmethod
     def _add_UT_DT_constraints(m):
@@ -534,7 +540,7 @@ class DAM_thermal_bidding:
         return power_output
 
     # define a fucntion to get the bidding power and corresponding prices
-    def get_bid_power_price(self,m_bid,price_forecast,plan_horizon = 48,verbose = False):
+    def get_bid_power_price_old(self,m_bid,price_forecast,plan_horizon = 48,verbose = False):
 
         '''
         Get the bidding curves of the generator from the result of SP.
@@ -645,6 +651,9 @@ class DAM_thermal_bidding:
         return power_output_dict, marginal_cost_dict, cost_dict
 
     def stochastic_bidding(self,date):
+        '''
+        Solve the stochastic bidding optimization problem.
+        '''
 
         print("")
         print("In stochastic_bidding\n")
@@ -665,38 +674,77 @@ class DAM_thermal_bidding:
         solver = pyo.SolverFactory('gurobi')
         result = solver.solve(m,tee=True)
 
-        ## TODO: extract the bids out from the model
-        self.get_bid_power_price()
+        # extract the bids out from the model
+        bids = self.get_bid_power_price()
 
-        ## TODO: save them into a data structure as class property
-        self.pass_bid_to_prescient(options, simulator, ruc_instance, ruc_date, ruc_hour)
-
-        return
+        return bids
 
     def get_bid_power_price(self):
 
-        pass
+        '''
+        return bids {t: {gen:{power: cost}}}
+        '''
 
-    def pass_bid_to_prescient(self, options, simulator, ruc_instance, ruc_date, ruc_hour):
+        bids = {}
 
-        # extract bid curve out from the model
-        power_output_dict, marginal_cost_dict, cost_dict = \
-        self.get_bid_power_price(self.model,forecasts,verbose = True)
+        for t in self.model.HOUR:
+            bids[t] = {}
+            for gen in self.model.UNITS:
 
-        ## TODO access the bid from class property
+                # get the pmin of the gen
+                pmin = self.model_data['Pmin'][gen]
 
-        # TODO: make sure the data type works here
-        # actual passing
-        for gen_name in self.model.UNITS:
-            gen_dict = ruc_instance.data['elements']['generator'][gen_name]
-            p_cost = [[(gpnt, gval) for gpnt, gval in zip(gpoints[t], gvalues[t])] for t in range(options.ruc_horizon)]
+                # declare a dict to store the pmin
+                temp_bids = {}
 
-            gen_dict['p_cost'] = {'data_type': 'time_series',
-                                  'values': [{'data_type' : 'cost_curve',
-                                             'cost_curve_type':'piecewise',
-                                             'values':p_cost[t]} for t in range(options.ruc_horizon)]
-                                 }
-        return
+                # add the bids from the model
+                for k in self.model.SCENARIOS:
+                    power = round(pyo.value(self.model.P_T[gen,t,k]),2)
+                    marginal_cost = pyo.value(self.model.DAM_price[t,k])
+
+                    if power < pmin:
+                        continue
+
+                    # add bids without duplicates
+                    if power in temp_bids:
+                        temp_bids[power] = min(temp_bids[power],marginal_cost)
+                    else:
+                        temp_bids[power] = marginal_cost
+
+                # make sure the orignal points in the bids
+                for power, marginal_cost in self.model_data['Original Marginal Cost Curve'][gen].items():
+
+                    if power in temp_bids:
+                        pass
+                    else:
+                        temp_bids[power] = marginal_cost
+
+                # sort the curves by power
+                temp_bids = OrderedDict(sorted(temp_bids.items()))
+
+                # make sure the curve is nondecreasing
+                pre_power = pmin
+                for power, marginal_cost in temp_bids.items():
+
+                    # ignore pmin, because min load cost is special
+                    if pre_power == pmin:
+                        pre_power = power
+                        continue
+                    temp_bids[power] = max(temp_bids[power],temp_bids[pre_power])
+
+                # calculate the actual cost
+                pre_power = 0
+                pre_cost = 0
+                for power, marginal_cost in temp_bids.items():
+
+                    delta_p = power - pre_power
+                    temp_bids[power] = pre_cost + marginal_cost * delta_p
+                    pre_power = power
+                    pre_cost += marginal_cost * delta_p
+
+                bids[t][gen] = temp_bids
+
+        return bids
 
     def record_bids(self,ruc_date):
         '''

@@ -5,9 +5,6 @@
 import numpy as np
 import pandas as pd
 import pyomo.environ as pyo
-import matplotlib.pyplot as plt
-from scipy.interpolate import interp1d
-import copy
 import os
 from collections import deque
 from itertools import combinations
@@ -193,7 +190,7 @@ class DAM_thermal_bidding:
         m.HOUR = pyo.Set(initialize = range(plan_horizon))
         m.SEGMENTS = pyo.Set(initialize = range(1, segment_number))
         m.UNITS = pyo.Set(initialize = model_data['Generator'], ordered = True)
-        m.SCENARIOS = Set(initialize = range(n_scenario))
+        m.SCENARIOS = pyo.Set(initialize = range(n_scenario))
 
         ## define the parameters
 
@@ -272,7 +269,7 @@ class DAM_thermal_bidding:
             return m.on_off[j,h,k] * m.Pmin[j] <= m.P_T[j,h,k]
         m.lhs_bnd_gen_pow = pyo.Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = lhs_bnd_gen_pow_fun)
 
-        def rhs_bnd_gen_pow_fun(m,j,h):
+        def rhs_bnd_gen_pow_fun(m,j,h,k):
             return m.P_T[j,h,k] <= m.on_off[j,h,k] * m.Pmax[j]
         m.rhs_bnd_gen_pow = pyo.Constraint(m.UNITS,m.HOUR,m.SCENARIOS,rule = rhs_bnd_gen_pow_fun)
 
@@ -336,7 +333,7 @@ class DAM_thermal_bidding:
             '''
             if h == 0:
                 return m.pre_P_T[j] - m.P_T[j,h,k] <= m.ramp_dw[j] * m.on_off[j,h,k]\
-                + m.ramp_shut_dw[j] * m.shut_dw[j,h]
+                + m.ramp_shut_dw[j] * m.shut_dw[j,h,k]
             else:
                 return m.P_T[j,h-1,k] - m.P_T[j,h,k] <= m.ramp_dw[j] * m.on_off[j,h,k]\
                 + m.ramp_shut_dw[j] * m.shut_dw[j,h,k]
@@ -639,7 +636,7 @@ class DAM_thermal_bidding:
                 m.DAM_price[t,i] = forecasts[i,t]
 
         # solve the model
-        solver = SolverFactory('gurobi')
+        solver = pyo.SolverFactory('gurobi')
         result = solver.solve(m,tee=True)
 
         ## TODO: extract the bids out from the model

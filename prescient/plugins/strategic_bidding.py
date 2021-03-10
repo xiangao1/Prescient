@@ -130,6 +130,8 @@ class DAM_thermal_bidding:
         # power segments and marginal costs
         model_data['Power Segments'] = {}
         model_data['Marginal Costs'] = {}
+
+        model_data['Min Load Cost'] = dict(zip(generator_names,gen_params['HR_avg_0']/1000 * gen_params['Fuel Price $/MMBTU'] * gen_params['PMin MW']))
         for gen in generator_names:
             df = get_data_given(df = gen_params, generator = gen)
             for l in range(1,4):
@@ -139,12 +141,36 @@ class DAM_thermal_bidding:
                 # segment marginal cost
                 model_data['Marginal Costs'][(gen,l)] = float(df['HR_incr_{}'.format(l)]/1000 * df['Fuel Price $/MMBTU'])
 
-        model_data['Min Load Cost'] = dict(zip(generator_names,gen_params['HR_avg_0']/1000 * gen_params['Fuel Price $/MMBTU'] * gen_params['PMin MW']))
+        # get the original cost curve
+        model_data['Original Cost Curve'] = {}
+        for gen in generator_names:
+            model_data['Original Cost Curve'][gen] = {}
+
+            pmin = round(model_data['Pmin'][gen],2)
+            model_data['Original Cost Curve'][gen][pmin] = model_data['Min Load Cost'][gen]
+
+            old_p = pmin
+            old_cost = model_data['Original Cost Curve'][gen][pmin]
+            for l in range(1,4):
+
+                new_p = round(model_data['Power Segments'][(gen,l)],2)
+                delta_p = new_p - old_p
+
+                increased_cost = delta_p * model_data['Marginal Costs'][(gen,l)]
+                model_data['Original Cost Curve'][gen][new_p] = old_cost + increased_cost
+
+                old_cost += increased_cost
+                old_p = new_p
 
         for key in kwargs:
             model_data[key] = {gen: kwargs[key] for gen in generator_names}
 
         return model_data
+
+    def get_original_cost_curve(self):
+        original_cost_curve = {}
+        for gen in self.model_data['Generator']:
+            pass
 
     @staticmethod
     def _add_UT_DT_constraints(m):
@@ -640,10 +666,16 @@ class DAM_thermal_bidding:
         result = solver.solve(m,tee=True)
 
         ## TODO: extract the bids out from the model
+        self.get_bid_power_price()
 
         ## TODO: save them into a data structure as class property
+        self.pass_bid_to_prescient(options, simulator, ruc_instance, ruc_date, ruc_hour)
 
         return
+
+    def get_bid_power_price(self):
+
+        pass
 
     def pass_bid_to_prescient(self, options, simulator, ruc_instance, ruc_date, ruc_hour):
 

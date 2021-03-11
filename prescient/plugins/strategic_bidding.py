@@ -455,10 +455,10 @@ class DAM_thermal_bidding:
 
         return
 
-    def update_model(self,m,implemented_power_output,implemented_shut_down, implemented_start_up):
+    def update_model(self,implemented_power_output,implemented_shut_down, implemented_start_up):
 
-        self._update_UT_DT(m,implemented_shut_down, implemented_start_up)
-        self._update_power(m,implemented_power_output)
+        self._update_UT_DT(self.model,implemented_shut_down, implemented_start_up)
+        self._update_power(self.model,implemented_power_output)
 
         return
 

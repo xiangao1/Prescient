@@ -64,193 +64,510 @@ def get_data_given(df, bus=None, date=None, hour=None, generator=None, fuel_type
 
 class DAM_thermal_tracking:
 
-     # define a function to extract power ouput for a hour
-     @staticmethod
-     def extract_power(m, horizon = 24):
+    def __init__(self,rts_gmlc_data_dir,tracking_horizon = 4, generators = None):
 
-         gen_pow = {unit: [value(m.P_T[unit,hour,0]) for hour in \
+        self.generators = generators
+
+        self.model_data = self.assemble_model_data(generator_names = generators, \
+                                                   rts_gmlc_data_dir = rts_gmlc_data_dir)
+        self.model = self.build_tracking_model(generators = generators, \
+                                               track_horizon = tracking_horizon)
+
+        self.power,\
+        self.on_off,\
+        self.start_up,\
+        self.shut_dw = {gen:[] for gen in generators}, \
+                       {gen:[] for gen in generators},\
+                       {gen:[] for gen in generators},\
+                       {gen:[] for gen in generators}
+
+    @staticmethod
+    def assemble_model_data(generator_names, rts_gmlc_data_dir, **kwargs):
+
+        # read data
+        gen_params = pd.read_csv(rts_gmlc_data_dir + 'gen.csv')
+        gen_params = gen_params[gen_params['GEN UID'].isin(generator_names)]
+
+        model_data = {}
+
+        # generator names
+        model_data['Generator'] = generator_names
+
+        # Pmin [MW]
+        model_data['Pmin'] = dict(zip(generator_names,gen_params['PMin MW']))
+
+        # Pmax [MW]
+        model_data['Pmax'] = dict(zip(generator_names,gen_params['PMax MW']))
+
+        # minimum up time [MW/hr]
+        model_data['UT'] = dict(zip(generator_names,gen_params['Min Up Time Hr'].astype(int)))
+
+        # minimum down time [hr]
+        model_data['DT'] = dict(zip(generator_names,gen_params['Min Down Time Hr'].astype(int)))
+
+        ## ramp rates [MW/hr]
+        ramp_rates = gen_params['Ramp Rate MW/Min'].values * 60
+
+        # ramp up rate [MW/hr]
+        model_data['RU'] = dict(zip(generator_names,ramp_rates))
+
+        # ramp down rate [MW/hr]
+        model_data['RD'] = dict(zip(generator_names,ramp_rates))
+
+        # ramp start up [MW/hr]
+        model_data['SU'] = {gen: min(model_data['Pmin'][gen],model_data['RU'][gen]) for gen in generator_names}
+
+        # ramp shut down [MW/hr] (will use pmin for now)
+        model_data['SD'] = {gen: min(model_data['Pmin'][gen],model_data['RD'][gen]) for gen in generator_names}
+
+        # start up cost [$/SU] (will use the warm start up cost for now)
+        start_up_cost = gen_params['Start Heat Warm MBTU'] * gen_params['Fuel Price $/MMBTU']
+        model_data['SU Cost'] = dict(zip(generator_names,start_up_cost))
+
+        ## production cost
+
+        # power segments and marginal costs
+        model_data['Power Segments'] = {}
+        model_data['Marginal Costs'] = {}
+
+        model_data['Min Load Cost'] = dict(zip(generator_names,gen_params['HR_avg_0']/1000 * gen_params['Fuel Price $/MMBTU'] * gen_params['PMin MW']))
+        for gen in generator_names:
+            df = get_data_given(df = gen_params, generator = gen)
+            for l in range(1,4):
+                # power segements
+                model_data['Power Segments'][(gen,l)] = float(df['Output_pct_{}'.format(l)] * df['PMax MW'])
+
+                # segment marginal cost
+                model_data['Marginal Costs'][(gen,l)] = float(df['HR_incr_{}'.format(l)]/1000 * df['Fuel Price $/MMBTU'])
+
+        for key in kwargs:
+            model_data[key] = {gen: kwargs[key] for gen in generator_names}
+
+        return model_data
+
+    def _build_model(self,
+                     plan_horizon = 48,
+                     segment_number = 4):
+
+        model_data = self.model_data
+        m = pyo.ConcreteModel()
+
+        ## define the sets
+        m.HOUR = pyo.Set(initialize = range(plan_horizon))
+        m.SEGMENTS = pyo.Set(initialize = range(1, segment_number))
+        m.UNITS = pyo.Set(initialize = model_data['Generator'], ordered = True)
+
+        ## define the parameters
+
+        # add power schedule as a Param
+        m.power_dispatch = pyo.Param(m.UNITS,m.HOUR, initialize = 0, mutable = True)
+
+        m.start_up_cost = pyo.Param(m.UNITS,initialize = model_data['SU Cost'],mutable = False)
+
+        # capacity of generators: upper bound (MW)
+        m.Pmax = pyo.Param(m.UNITS,initialize = model_data['Pmax'], mutable = False)
+
+        # minimum power of generators: lower bound (MW)
+        m.Pmin = pyo.Param(m.UNITS,initialize = model_data['Pmin'], mutable = False)
+
+        m.power_segment_bounds = pyo.Param(m.UNITS,m.SEGMENTS,initialize = model_data['Power Segments'], mutable = False)
+
+        # get the cost slopes
+        m.F = pyo.Param(m.UNITS,m.SEGMENTS,initialize = model_data['Marginal Costs'], mutable = False)
+
+        m.min_load_cost = pyo.Param(m.UNITS,initialize = model_data['Min Load Cost'], mutable = False)
+
+        # Ramp up limits (MW/h)
+        m.ramp_up = pyo.Param(m.UNITS,initialize = model_data['RU'], mutable = False)
+
+        # Ramp down limits (MW/h)
+        m.ramp_dw = pyo.Param(m.UNITS,initialize = model_data['RD'], mutable = False)
+
+        # start up ramp limit
+        m.ramp_start_up = pyo.Param(m.UNITS,initialize = model_data['SU'], mutable = False)
+
+        # shut down ramp limit
+        m.ramp_shut_dw = pyo.Param(m.UNITS,initialize = model_data['SD'], mutable = False)
+
+        # minimum down time [hr]
+        m.min_dw_time = pyo.Param(m.UNITS,initialize = model_data['DT'], mutable = False)
+
+        # minimum up time [hr]
+        m.min_up_time = pyo.Param(m.UNITS,initialize = model_data['UT'], mutable = False)
+
+        # power from the previous day (MW)
+        # need to assume the power output is at least always at the minimum pow output
+
+        # on/off status from previous day
+        m.pre_on_off = pyo.Param(m.UNITS,within = pyo.Binary,default= 1,mutable = True)
+
+        # define a function to initialize the previous power params
+        def init_pre_pow_fun(m,j):
+            return m.pre_on_off[j]*m.Pmin[j]
+        m.pre_P_T = pyo.Param(m.UNITS,initialize = init_pre_pow_fun, mutable = True)
+
+        ## define the variables
+
+        # generator power (MW)
+
+        # power generated by thermal generator
+        m.P_T = pyo.Var(m.UNITS,m.HOUR,within = pyo.NonNegativeReals)
+
+        # binary variables indicating on/off
+        m.on_off = pyo.Var(m.UNITS,m.HOUR,initialize = True, within = pyo.Binary)
+
+        # binary variables indicating  start_up
+        m.start_up = pyo.Var(m.UNITS,m.HOUR,initialize = False, within = pyo.Binary)
+
+        # binary variables indicating shut down
+        m.shut_dw = pyo.Var(m.UNITS,m.HOUR,initialize = False, within = pyo.Binary)
+
+        # power produced in each segment
+        m.power_segment = pyo.Var(m.UNITS,m.HOUR,m.SEGMENTS,  within = pyo.NonNegativeReals)
+
+        ## Constraints
+
+        # bounds on gen_pow
+        def lhs_bnd_gen_pow_fun(m,j,h):
+            return m.on_off[j,h] * m.Pmin[j] <= m.P_T[j,h]
+        m.lhs_bnd_gen_pow = pyo.Constraint(m.UNITS,m.HOUR,rule = lhs_bnd_gen_pow_fun)
+
+        def rhs_bnd_gen_pow_fun(m,j,h):
+            return m.P_T[j,h] <= m.on_off[j,h] * m.Pmax[j]
+        m.rhs_bnd_gen_pow = pyo.Constraint(m.UNITS,m.HOUR,rule = rhs_bnd_gen_pow_fun)
+
+        # linearized power
+        def linear_power_fun(m,j,h):
+            return m.P_T[j,h] == \
+            sum(m.power_segment[j,h,l] for l in m.SEGMENTS) + m.Pmin[j]*m.on_off[j,h]
+        m.linear_power = pyo.Constraint(m.UNITS,m.HOUR,rule = linear_power_fun)
+
+        # bounds on segment power
+        def seg_pow_bnd_fun(m,j,h,l):
+            if l == 1:
+                return m.power_segment[j,h,l]<= (m.power_segment_bounds[j,l] - m.Pmin[j]) * m.on_off[j,h]
+            else:
+                return m.power_segment[j,h,l]<= (m.power_segment_bounds[j,l] - m.power_segment_bounds[j,l-1]) * m.on_off[j,h]
+        m.seg_pow_bnd = pyo.Constraint(m.UNITS,m.HOUR,m.SEGMENTS,rule = seg_pow_bnd_fun)
+
+        # start up and shut down logic (Arroyo and Conejo 2000)
+        def start_up_shut_dw_fun(m,j,h):
+            if h == 0:
+                return m.start_up[j,h] - m.shut_dw[j,h] == m.on_off[j,h] - m.pre_on_off[j]
+            else:
+                return m.start_up[j,h] - m.shut_dw[j,h] == m.on_off[j,h] - m.on_off[j,h-1]
+        m.start_up_shut_dw = pyo.Constraint(m.UNITS,m.HOUR,rule = start_up_shut_dw_fun)
+
+        # either start up or shut down
+        def start_up_or_shut_dw_fun(m,j,h):
+            return m.start_up[j,h] + m.shut_dw[j,h] <= 1
+        m.start_up_or_shut_dw = pyo.Constraint(m.UNITS,m.HOUR,rule = start_up_or_shut_dw_fun)
+
+        # ramp up limits
+        def ramp_up_fun(m,j,h):
+            '''
+            j,h stand for unit, hour,scenario respectively.
+            '''
+            if h==0:
+                return m.P_T[j,h] <= m.pre_P_T[j] \
+                + m.ramp_up[j]*m.pre_on_off[j]\
+                + m.ramp_start_up[j]*m.start_up[j,h]
+            else:
+                return m.P_T[j,h] <= m.P_T[j,h-1] \
+                + m.ramp_up[j]*m.on_off[j,h-1]\
+                + m.ramp_start_up[j]*m.start_up[j,h]
+        m.ramp_up_con = pyo.Constraint(m.UNITS,m.HOUR,rule = ramp_up_fun)
+
+        # ramp shut down limits
+        def ramp_shut_dw_fun(m,j,h):
+            '''
+            j,h stand for unit, hour,scenario respectively.
+            '''
+            if h==0:
+                return m.pre_P_T[j] <= m.Pmax[j]*m.on_off[j,h] + m.ramp_shut_dw[j] * m.shut_dw[j,h]
+            else:
+                return m.P_T[j,h-1] <= m.Pmax[j]*m.on_off[j,h] + m.ramp_shut_dw[j] * m.shut_dw[j,h]
+        m.ramp_shut_dw_con = pyo.Constraint(m.UNITS,m.HOUR,rule = ramp_shut_dw_fun)
+
+        # ramp down limits
+        def ramp_dw_fun(m,j,h):
+            '''
+            j,h stand for unit, hour,scenario respectively.
+            '''
+            if h == 0:
+                return m.pre_P_T[j] - m.P_T[j,h] <= m.ramp_dw[j] * m.on_off[j,h]\
+                + m.ramp_shut_dw[j] * m.shut_dw[j,h]
+            else:
+                return m.P_T[j,h-1] - m.P_T[j,h] <= m.ramp_dw[j] * m.on_off[j,h]\
+                + m.ramp_shut_dw[j] * m.shut_dw[j,h]
+        m.ramp_dw_con = pyo.Constraint(m.UNITS,m.HOUR,rule = ramp_dw_fun)
+
+        ## add min up and down time constraints
+        self._add_UT_DT_constraints(m)
+
+        ## Expression
+
+        def prod_cost_fun(m,j,h):
+            return m.min_load_cost[j] * m.on_off[j,h] \
+            + sum(m.F[j,l]*m.power_segment[j,h,l] for l in m.SEGMENTS)
+        m.prod_cost_approx = pyo.Expression(m.UNITS,m.HOUR,rule = prod_cost_fun)
+
+        # start up costs
+        def start_cost_fun(m,j,h):
+            return m.start_up_cost[j]*m.start_up[j,h]
+        m.start_up_cost_expr = pyo.Expression(m.UNITS,m.HOUR,rule = start_cost_fun)
+
+        # total cost
+        def tot_cost_fun(m,j,h):
+            return m.prod_cost_approx[j,h] + m.start_up_cost_expr[j,h]
+        m.tot_cost = pyo.Expression(m.UNITS,m.HOUR,rule = tot_cost_fun)
+
+        return m
+
+    @staticmethod
+    def _add_UT_DT_constraints(m):
+
+        def pre_shut_down_trajectory_set_rule(m):
+            return ((j,t) for j in m.UNITS for t in range(-pyo.value(m.min_dw_time[j]) + 1,0))
+        m.pre_shut_down_trajectory_set = pyo.Set(dimen = 2,initialize = pre_shut_down_trajectory_set_rule, ordered = True)
+
+        def pre_start_up_trajectory_set_rule(m):
+            return ((j,t) for j in m.UNITS for t in range(-pyo.value(m.min_up_time[j]) + 1,0))
+        m.pre_start_up_trajectory_set = pyo.Set(dimen = 2,initialize = pre_start_up_trajectory_set_rule, ordered = True)
+
+        m.pre_shut_down_trajectory = pyo.Param(m.pre_shut_down_trajectory_set, initialize = 0, mutable = True)
+        m.pre_start_up_trajectory = pyo.Param(m.pre_start_up_trajectory_set, initialize = 0, mutable = True)
+
+        def min_down_time_rule(m,j,h):
+            if h < pyo.value(m.min_dw_time[j]):
+                return sum(m.pre_shut_down_trajectory[j,h0] for h0 in range(h - pyo.value(m.min_dw_time[j]) + 1,0)) \
+                       + sum(m.shut_dw[j,h0] for h0 in range(h + 1)) <= 1 - m.on_off[j,h]
+            else:
+                return sum(m.shut_dw[j,h0] for h0 in range(h - pyo.value(m.min_dw_time[j]) + 1, h + 1)) <= 1 - m.on_off[j,h]
+        m.min_down_time_con = pyo.Constraint(m.UNITS,m.HOUR,rule = min_down_time_rule)
+
+        def min_up_time_rule(m,j,h):
+            if h < pyo.value(m.min_up_time[j]):
+                return sum(m.pre_start_up_trajectory[j,h0] for h0 in range(h - pyo.value(m.min_up_time[j]) + 1,0)) \
+                       + sum(m.start_up[j,h0] for h0 in range(h + 1)) <= m.on_off[j,h]
+            else:
+                return sum(m.start_up[j,h0] for h0 in range(h - pyo.value(m.min_up_time[j]) + 1, h + 1)) <= m.on_off[j,h]
+        m.min_up_time_con = pyo.Constraint(m.UNITS,m.HOUR,rule = min_up_time_rule)
+
+        return
+
+     # define a function to extract power ouput for a hour
+    @staticmethod
+    def extract_power(m, horizon = 24):
+
+         gen_pow = {unit: [pyo.value(m.P_T[unit,hour]) for hour in \
          range(horizon)] for unit in m.UNITS}
 
          return gen_pow
 
-     @staticmethod
-     def extract_on_off(m,horizon = 24):
-         on_off = {unit: [value(m.on_off[unit,hour,0]) for hour in \
-         range(horizon)] for unit in m.UNITS}
+    @staticmethod
+    def extract_on_off(m,horizon = 24):
+        on_off = {unit: [pyo.value(m.on_off[unit,hour]) for hour in \
+        range(horizon)] for unit in m.UNITS}
 
-         return on_off
+        return on_off
 
-     @staticmethod
-     def extract_start_up(m,horizon = 24):
-         start_up = {unit: [value(m.start_up[unit,hour,0]) for hour in \
-         range(horizon)] for unit in m.UNITS}
+    @staticmethod
+    def extract_start_up(m,horizon = 24):
+        start_up = {unit: [pyo.value(m.start_up[unit,hour]) for hour in \
+        range(horizon)] for unit in m.UNITS}
 
-         return start_up
+        return start_up
 
-     @staticmethod
-     def extract_shut_dw(m,horizon = 24):
-         shut_dw = {unit: [value(m.shut_dw[unit,hour,0]) for hour in \
-         range(horizon)] for unit in m.UNITS}
+    @staticmethod
+    def extract_shut_dw(m,horizon = 24):
+        shut_dw = {unit: [pyo.value(m.shut_dw[unit,hour]) for hour in \
+        range(horizon)] for unit in m.UNITS}
 
-         return shut_dw
+        return shut_dw
 
-     # need a function to extract all the information
-     def record_settlement(self,m,real_price,record_stats = False):
+    def extract_outputs(self, m, horizon = 24):
 
-         if record_stats:
+        power = self.extract_power(m,horizon = horizon)
+        on_off = self.extract_on_off(m,horizon = horizon)
+        start_up = self.extract_start_up(m,horizon = horizon)
+        shut_dw = self.extract_shut_dw(m,horizon = horizon)
 
-             gen_eng = self.extract_eng_s_s(m)
-             gen_pow,gen_pow_seg = self.extract_pow_s_s(m,segment_power=True)
-             on_off,tot_on_hours = self.extract_on_off_s_s(m,total_num = True)
-             start_up,tot_start_times = self.extract_start_up_s_s(m,total_num = True)
+        return power,on_off,start_up,shut_dw
 
-             rev,tot_rev = self.calc_revenue_s_s(gen_eng,gen_pow_seg,on_off,start_up,real_price)
+    # need a function to extract all the information
+    def record_settlement(self,m,real_price,record_stats = False):
 
-             return gen_eng,gen_pow,on_off,start_up,rev,tot_rev,tot_on_hours,\
-             tot_start_times
+     if record_stats:
 
          gen_eng = self.extract_eng_s_s(m)
          gen_pow,gen_pow_seg = self.extract_pow_s_s(m,segment_power=True)
-         on_off = self.extract_on_off_s_s(m)
-         start_up = self.extract_start_up_s_s(m)
+         on_off,tot_on_hours = self.extract_on_off_s_s(m,total_num = True)
+         start_up,tot_start_times = self.extract_start_up_s_s(m,total_num = True)
 
          rev,tot_rev = self.calc_revenue_s_s(gen_eng,gen_pow_seg,on_off,start_up,real_price)
 
-         return gen_eng,gen_pow,on_off,start_up,rev,tot_rev
+         return gen_eng,gen_pow,on_off,start_up,rev,tot_rev,tot_on_hours,\
+         tot_start_times
 
-     # define a function to track the commitment to the market
-     def build_tracking_model(self,track_horizon,generator,track_type = 'RUC',hybrid = False):
+     gen_eng = self.extract_eng_s_s(m)
+     gen_pow,gen_pow_seg = self.extract_pow_s_s(m,segment_power=True)
+     on_off = self.extract_on_off_s_s(m)
+     start_up = self.extract_start_up_s_s(m)
 
-         print("")
-         print("In build_tracking_model\n")
+     rev,tot_rev = self.calc_revenue_s_s(gen_eng,gen_pow_seg,on_off,start_up,real_price)
 
-         if hybrid == False:
-             # build another pyomo model with 1 scenario
-             m_control = self.DAM_thermal(plan_horizon = track_horizon,generator=generator)
+     return gen_eng,gen_pow,on_off,start_up,rev,tot_rev
 
+    def build_tracking_model(self, generators, track_horizon):
+
+     m = self._build_model(plan_horizon = track_horizon)
+     self._add_tracking_constraints_and_objectives(m)
+
+     return m
+
+    # define a function to track the commitment to the market
+    def _add_tracking_constraints_and_objectives(self,m,ramping_weight = 20):
+
+     # add params for objective weights
+     m.cost_weight = pyo.Param(initialize = 1, mutable = False)
+     m.ramping_weight = pyo.Param(initialize = ramping_weight, mutable = True)
+
+     def fix_power_output_fun(m,j,h):
+         return m.P_T[j,h] == m.power_dispatch[j,h]
+     m.fix_power_output_con = pyo.Constraint(m.UNITS,m.HOUR,rule = fix_power_output_fun)
+
+     ## USE L1 norm
+     # add a slack variable for ramping
+     m.slack_var_ramp = pyo.Var(m.UNITS,m.HOUR,within = pyo.NonNegativeReals)
+
+     # add constraints for ramping
+     def abs_ramp_con_fun1(m,j,h):
+         if h == 0:
+             return -m.slack_var_ramp[j,h]<=m.P_T[j,h] - m.pre_P_T[j]
          else:
-             # build a hybrid model
-             m_control = self.DAM_hybrid(plan_horizon = track_horizon,generator=generator)
+             return -m.slack_var_ramp[j,h]<=m.P_T[j,h] - m.P_T[j,h-1]
+     m.abs_ramp_con1 = pyo.Constraint(m.UNITS,m.HOUR,rule = abs_ramp_con_fun1)
 
-             # switch the model to 1a: because we want to hide the storage now
-             m_control = self.switch_model_mode(m_control,'1a')
+     def abs_ramp_con_fun2(m,j,h):
+         if h == 0:
+             return m.slack_var_ramp[j,h]>=m.P_T[j,h] - m.pre_P_T[j]
+         else:
+             return m.slack_var_ramp[j,h]>=m.P_T[j,h] - m.P_T[j,h-1]
+     m.abs_ramp_con2 = pyo.Constraint(m.UNITS,m.HOUR,rule = abs_ramp_con_fun2)
 
-         # remove the current objective function
-         m_control.exp_revenue.deactivate()
+     def power_abs_least(m):
+         return m.ramping_weight * sum(m.slack_var_ramp[j,h] for h in m.HOUR for j in m.UNITS)\
+                + m.cost_weight * sum(m.tot_cost[j,h] for h in m.HOUR for j in m.UNITS)
+     m.abs_dev = pyo.Objective(rule = power_abs_least,sense = pyo.minimize)
 
-         # add power schedule as a Param
-         m_control.power_commit = Param(m_control.UNITS,m_control.HOUR, \
-         initialize = 0, mutable = True)
+     return
 
-         # add params for objective weights
-         m_control.deviation_weight = Param(initialize = 30, mutable = True)
-         m_control.cost_weight = Param(initialize = 1, mutable = True)
-         m_control.ramping_weight = Param(initialize = 20, mutable = True)
+    def pass_schedule_to_track(self, market_signals, implemented_steps = 1,solver = None):
 
-         ## USE L1 norm
+        '''
+        market_signals: {gen: []}
+        '''
 
-         # add a slack variable
-         m_control.slack_var_T = Var(m_control.UNITS,m_control.HOUR,\
-         m_control.SCENARIOS,within = NonNegativeReals)
+        m = self.model
+        for unit in m.UNITS:
+            for t in m.HOUR:
+                m.power_dispatch[unit,t] = market_signals[unit][t]
 
-         # add a slack variable for ramping
-         m_control.slack_var_Ramp = Var(m_control.UNITS,m_control.HOUR,\
-         m_control.SCENARIOS,within = NonNegativeReals)
+        if solver is None:
+            solver = pyo.SolverFactory('gurobi')
 
-         if hybrid == False:
+        # solve the model
+        solver.solve(m,tee=True)
 
-             # add constraints
-             def abs_con_fun1(m,j,h,k):
-                 return -m.slack_var_T[j,h,k]<=m.gen_pow[j,h,0] - m.power_commit[j,h]
-             m_control.abs_con1 = Constraint(m_control.UNITS,m_control.HOUR,\
-             m_control.SCENARIOS,rule = abs_con_fun1)
+        # extract implemented power
+        power,\
+        on_off,\
+        start_up,\
+        shut_dw = self.extract_outputs(m,horizon = implemented_steps)
 
-             def abs_con_fun2(m,j,h,k):
-                 return m.slack_var_T[j,h,k]>=m.gen_pow[j,h,0] - m.power_commit[j,h]
-             m_control.abs_con2 = Constraint(m_control.UNITS,\
-             m_control.HOUR,m_control.SCENARIOS,rule = abs_con_fun2)
+        # append the implemented stats to a class property
+        self.record_outputs(power = power, \
+                            on_off = on_off, \
+                            start_up = start_up, \
+                            shut_dw = shut_dw)
 
-             # add constraints for ramping
-             def abs_ramp_con_fun1(m,j,h,k):
-                 if h == 0:
-                     return -m.slack_var_Ramp[j,h,k]<=m.gen_pow[j,h,0] - m.pre_pow[j]
-                 else:
-                     return -m.slack_var_Ramp[j,h,k]<=m.gen_pow[j,h,0] - m.gen_pow[j,h-1,0]
-             m_control.abs_ramp_con1 = Constraint(m_control.UNITS,m_control.HOUR,\
-             m_control.SCENARIOS,rule = abs_ramp_con_fun1)
+        # update the model
+        self.update_model(implemented_power_output = power,\
+                          implemented_shut_down = shut_dw,\
+                          implemented_start_up = start_up)
+        return
 
-             def abs_ramp_con_fun2(m,j,h,k):
-                 if h == 0:
-                     return m.slack_var_Ramp[j,h,k]>=m.gen_pow[j,h,0] - m.pre_pow[j]
-                 else:
-                     return m.slack_var_Ramp[j,h,k]>=m.gen_pow[j,h,0] - m.gen_pow[j,h-1,0]
-             m_control.abs_ramp_con2 = Constraint(m_control.UNITS,\
-             m_control.HOUR,m_control.SCENARIOS,rule = abs_ramp_con_fun2)
+    def record_outputs(self, power, on_off, start_up, shut_dw):
 
-             # burn in penalty type
-             m_control.track_type =  track_type
+        for gen in self.generators:
+            self.power[gen] += power[gen]
+            self.on_off[gen] += on_off[gen]
+            self.start_up[gen] += start_up[gen]
+            self.shut_dw[gen] += shut_dw[gen]
 
-             if track_type == 'RUC':
+        return
 
-                 def power_abs_least(m):
-                     return sum(m.slack_var_T[j,h,k] for j in m.UNITS \
-                     for h in m.HOUR for k in m.SCENARIOS)
-                 m_control.abs_dev = Objective(rule = power_abs_least,sense = minimize)
+    @staticmethod
+    def _update_UT_DT(m,implemented_shut_down, implemented_start_up):
+     '''
+     implemented_shut_down: {unit: []}
+     implemented_start_up: {unit: []}
+     '''
 
-             elif track_type == 'SCED':
+     # copy to a queue
+     pre_shut_down_trajectory_copy = {}
+     pre_start_up_trajectory_copy = {}
 
-                 # m_control.RT_price = Param(m_control.HOUR,initialize = 20, mutable = True)
-                 # m_control.small_penalty = Param(m_control.HOUR,initialize = 10, mutable = True)
+     for unit in m.UNITS:
+         pre_shut_down_trajectory_copy[unit] = deque([])
+         pre_start_up_trajectory_copy[unit] = deque([])
 
-                 def rt_penalty_fun(m):
-                     return sum(m.small_penalty[h]*m.slack_var_T[j,h,0]\
-                     for j in m.UNITS for h in range(1,len(m.HOUR)))\
-                     - (m.gen_pow[j,0,0] - m.power_commit[j,0])* m.RT_price[0]
-                 # m_control.rt_penalty = Objective(rule = rt_penalty_fun,sense = minimize)
+     for unit,t in m.pre_shut_down_trajectory_set:
+         pre_shut_down_trajectory_copy[unit].append(round(pyo.value(m.pre_shut_down_trajectory[unit,t])))
+     for unit,t in m.pre_start_up_trajectory_set:
+         pre_start_up_trajectory_copy[unit].append(round(pyo.value(m.pre_start_up_trajectory[unit,t])))
 
-                 def power_abs_least(m):
-                     return m.deviation_weight*sum(m.slack_var_T[j,h,k] \
-                     for h in m.HOUR for k in m.SCENARIOS for j in m.UNITS) \
-                     + m.ramping_weight * sum(m.slack_var_Ramp[j,h,k] \
-                     for h in m.HOUR for k in m.SCENARIOS for j in m.UNITS)
-                     + m.cost_weight * sum(m.tot_cost[h,k] for h in m.HOUR for k in m.SCENARIOS)
-                 m_control.abs_dev = Objective(rule = power_abs_least,sense = minimize)
+     # add implemented trajectory to the queue
+     for unit in m.UNITS:
+         pre_shut_down_trajectory_copy[unit] += deque(implemented_shut_down[unit])
+         pre_start_up_trajectory_copy[unit] += deque(implemented_start_up[unit])
 
-         return m_control
+     # pop out outdated trajectory
+     for unit in m.UNITS:
 
-     def pass_schedule_to_track_and_solve(self,m_control,RUC_dispatch,\
-                                          deviation_weight=30, \
-                                          ramping_weight=20,\
-                                          cost_weight = 1,\
-                                          SCED_dispatch=None,\
-                                          RT_price=None):
+         while len(pre_shut_down_trajectory_copy[unit]) > pyo.value(m.min_dw_time[unit]) - 1:
+             pre_shut_down_trajectory_copy[unit].popleft()
+         while len(pre_start_up_trajectory_copy[unit]) > pyo.value(m.min_up_time[unit]) - 1:
+             pre_start_up_trajectory_copy[unit].popleft()
 
-         # pass the RUC dispatch level
-         for j in m_control.UNITS:
-             for h in m_control.HOUR:
-                 m_control.power_commit[j,h] = RUC_dispatch[j][h]
+     # actual update
+     for unit,t in m.pre_shut_down_trajectory_set:
+         m.pre_shut_down_trajectory[unit,t] = pre_shut_down_trajectory_copy[unit].popleft()
 
-         # pass sced data
-         if m_control.track_type == 'SCED':
+     for unit,t in m.pre_start_up_trajectory_set:
+         m.pre_start_up_trajectory[unit,t] = pre_start_up_trajectory_copy[unit].popleft()
 
-             # real-time price
-        # for h in m_control.HOUR:
-             #     m_control.RT_price[h] = RT_price[h]
+     return
 
-             # dispatch
-             for j in m_control.UNITS:
-                 m_control.power_commit[j,0] = SCED_dispatch[j][0]
+    @staticmethod
+    def _update_power(m,implemented_power_output):
+     '''
+     implemented_power_output: {unit: []}
+     '''
 
-         m_control.deviation_weight = deviation_weight
-         m_control.cost_weight = cost_weight
-         m_control.ramping_weight = ramping_weight
+     for unit in m.UNITS:
+         m.pre_P_T[unit] = round(implemented_power_output[unit][-1],2)
+         m.pre_on_off[unit] = round(int(implemented_power_output[unit][-1] > 1e-3))
 
-         # solve the model
-         solver = SolverFactory('gurobi')
-         result = solver.solve(m_control,tee=True)
+     return
 
-         return
+    def update_model(self,implemented_power_output,implemented_shut_down, implemented_start_up):
 
+     self._update_UT_DT(self.model,implemented_shut_down, implemented_start_up)
+     self._update_power(self.model,implemented_power_output)
+
+     return
 
 class DAM_hybrid_tracking:
 

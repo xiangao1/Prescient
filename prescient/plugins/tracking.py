@@ -73,13 +73,7 @@ class DAM_thermal_tracking:
         self.model = self.build_tracking_model(generators = generators, \
                                                track_horizon = tracking_horizon)
 
-        self.power,\
-        self.on_off,\
-        self.start_up,\
-        self.shut_dw = {gen:[] for gen in generators}, \
-                       {gen:[] for gen in generators},\
-                       {gen:[] for gen in generators},\
-                       {gen:[] for gen in generators}
+        self.result_list = []
 
     @staticmethod
     def assemble_model_data(generator_names, rts_gmlc_data_dir, **kwargs):
@@ -463,7 +457,12 @@ class DAM_thermal_tracking:
 
      return
 
-    def pass_schedule_to_track(self, market_signals, implemented_steps = 1,solver = None):
+    def pass_schedule_to_track(self, \
+                               market_signals, \
+                               last_implemented_time_step = 0, \
+                               date = None,\
+                               hour = None,\
+                               solver = None):
 
         '''
         market_signals: {gen: []}
@@ -480,94 +479,121 @@ class DAM_thermal_tracking:
         # solve the model
         solver.solve(m,tee=True)
 
-        # extract implemented power
-        power,\
-        on_off,\
-        start_up,\
-        shut_dw = self.extract_outputs(m,horizon = implemented_steps)
-
         # append the implemented stats to a class property
-        self.record_outputs(power = power, \
-                            on_off = on_off, \
-                            start_up = start_up, \
-                            shut_dw = shut_dw)
+        self.record_results(market_signals = market_signals,\
+                            date = date, \
+                            hour = hour)
 
         # update the model
-        self.update_model(implemented_power_output = power,\
-                          implemented_shut_down = shut_dw,\
-                          implemented_start_up = start_up)
-        return
-
-    def record_outputs(self, power, on_off, start_up, shut_dw):
-
-        for gen in self.generators:
-            self.power[gen] += power[gen]
-            self.on_off[gen] += on_off[gen]
-            self.start_up[gen] += start_up[gen]
-            self.shut_dw[gen] += shut_dw[gen]
+        self.update_model(last_implemented_time_step = last_implemented_time_step)
 
         return
 
     @staticmethod
-    def _update_UT_DT(m,implemented_shut_down, implemented_start_up):
-     '''
-     implemented_shut_down: {unit: []}
-     implemented_start_up: {unit: []}
-     '''
+    def _update_UT_DT(m,last_implemented_time_step = 0):
 
-     # copy to a queue
-     pre_shut_down_trajectory_copy = {}
-     pre_start_up_trajectory_copy = {}
+        # copy to a queue
+        pre_shut_down_trajectory_copy = {}
+        pre_start_up_trajectory_copy = {}
 
-     for unit in m.UNITS:
-         pre_shut_down_trajectory_copy[unit] = deque([])
-         pre_start_up_trajectory_copy[unit] = deque([])
+        for unit in m.UNITS:
+            pre_shut_down_trajectory_copy[unit] = deque([])
+            pre_start_up_trajectory_copy[unit] = deque([])
 
-     for unit,t in m.pre_shut_down_trajectory_set:
-         pre_shut_down_trajectory_copy[unit].append(round(pyo.value(m.pre_shut_down_trajectory[unit,t])))
-     for unit,t in m.pre_start_up_trajectory_set:
-         pre_start_up_trajectory_copy[unit].append(round(pyo.value(m.pre_start_up_trajectory[unit,t])))
+        for unit,t in m.pre_shut_down_trajectory_set:
+            pre_shut_down_trajectory_copy[unit].append(round(pyo.value(m.pre_shut_down_trajectory[unit,t])))
+        for unit,t in m.pre_start_up_trajectory_set:
+            pre_start_up_trajectory_copy[unit].append(round(pyo.value(m.pre_start_up_trajectory[unit,t])))
 
-     # add implemented trajectory to the queue
-     for unit in m.UNITS:
-         pre_shut_down_trajectory_copy[unit] += deque(implemented_shut_down[unit])
-         pre_start_up_trajectory_copy[unit] += deque(implemented_start_up[unit])
+        # add implemented trajectory to the queue
+        for unit in m.UNITS:
+            for t in range(last_implemented_time_step + 1):
+                pre_shut_down_trajectory_copy[unit].append(round(pyo.value(m.shut_dw[unit,t])))
+                pre_start_up_trajectory_copy[unit].append(round(pyo.value(m.start_up[unit,t])))
 
-     # pop out outdated trajectory
-     for unit in m.UNITS:
+        # pop out outdated trajectory
+        for unit in m.UNITS:
 
-         while len(pre_shut_down_trajectory_copy[unit]) > pyo.value(m.min_dw_time[unit]) - 1:
-             pre_shut_down_trajectory_copy[unit].popleft()
-         while len(pre_start_up_trajectory_copy[unit]) > pyo.value(m.min_up_time[unit]) - 1:
-             pre_start_up_trajectory_copy[unit].popleft()
+            while len(pre_shut_down_trajectory_copy[unit]) > pyo.value(m.min_dw_time[unit]) - 1:
+                pre_shut_down_trajectory_copy[unit].popleft()
+            while len(pre_start_up_trajectory_copy[unit]) > pyo.value(m.min_up_time[unit]) - 1:
+                pre_start_up_trajectory_copy[unit].popleft()
 
-     # actual update
-     for unit,t in m.pre_shut_down_trajectory_set:
-         m.pre_shut_down_trajectory[unit,t] = pre_shut_down_trajectory_copy[unit].popleft()
+        # actual update
+        for unit,t in m.pre_shut_down_trajectory_set:
+            m.pre_shut_down_trajectory[unit,t] = pre_shut_down_trajectory_copy[unit].popleft()
 
-     for unit,t in m.pre_start_up_trajectory_set:
-         m.pre_start_up_trajectory[unit,t] = pre_start_up_trajectory_copy[unit].popleft()
+        for unit,t in m.pre_start_up_trajectory_set:
+            m.pre_start_up_trajectory[unit,t] = pre_start_up_trajectory_copy[unit].popleft()
 
-     return
+        return
 
     @staticmethod
-    def _update_power(m,implemented_power_output):
-     '''
-     implemented_power_output: {unit: []}
-     '''
+    def _update_power(m,last_implemented_time_step = 0):
 
-     for unit in m.UNITS:
-         m.pre_P_T[unit] = round(implemented_power_output[unit][-1],2)
-         m.pre_on_off[unit] = round(int(implemented_power_output[unit][-1] > 1e-3))
+        for unit in m.UNITS:
+            m.pre_P_T[unit] = round(pyo.value(m.P_T[unit,last_implemented_time_step]),2)
+            m.pre_on_off[unit] = round(pyo.value(m.on_off[unit,last_implemented_time_step]))
 
-     return
+        return
 
-    def update_model(self,implemented_power_output,implemented_shut_down, implemented_start_up):
+    def update_model(self,last_implemented_time_step = 0):
 
-     self._update_UT_DT(self.model,implemented_shut_down, implemented_start_up)
-     self._update_power(self.model,implemented_power_output)
+        self._update_UT_DT(self.model,last_implemented_time_step = last_implemented_time_step)
+        self._update_power(self.model,last_implemented_time_step = last_implemented_time_step)
 
-     return
+        return
+
+    def record_results(self, market_signals, date = None, hour = None, **kwargs):
+
+        '''
+        market_signals: {generator: {DA_dispatches: [], RT_dispatches; [], DA_LMP: [], RT_LMP; []}}
+        use queues, so we can pop the first one
+        '''
+        m = self.model
+
+        df_list = []
+        for generator in m.UNITS:
+            for t in m.HOUR:
+
+                result_dict = {}
+                result_dict['Generator'] = generator
+                result_dict['Date'] = date
+                result_dict['Hour'] = hour
+
+                # simulation inputs
+                result_dict['Horizon [hr]'] = int(t)
+                result_dict['Market Dispatch [MW]'] = float(round(market_signals[generator][t],2))
+                result_dict['Market Commitment [bin]'] = int(result_dict['Market Dispatch [MW]'] > 0)
+
+                # model vars
+                result_dict['Thermal Power Generated [MW]'] = float(round(pyo.value(m.P_T[generator,t]),2))
+
+                result_dict['On/off [bin]'] = int(round(pyo.value(m.on_off[generator,t])))
+                result_dict['Start Up [bin]'] = int(round(pyo.value(m.start_up[generator,t])))
+                result_dict['Shut Down [bin]'] = int(round(pyo.value(m.shut_dw[generator,t])))
+
+                result_dict['Production Cost [$]'] = float(round(pyo.value(m.prod_cost_approx[generator,t]),2))
+                result_dict['Start-up Cost [$]'] = float(round(pyo.value(m.start_up_cost_expr[generator,t]),2))
+                result_dict['Total Cost [$]'] = float(round(pyo.value(m.tot_cost[generator,t]),2))
+
+                # calculate mileage
+                if t == 0:
+                    result_dict['Mileage [MW]'] = float(round(abs(pyo.value(m.P_T[generator,t] - m.pre_P_T[generator])),2))
+                else:
+                    result_dict['Mileage [MW]'] = float(round(abs(pyo.value(m.P_T[generator,t] - m.P_T[generator,t-1])),2))
+
+                for key in kwargs:
+                    result_dict[key] = kwargs[key]
+
+                result_df = pd.DataFrame.from_dict(result_dict,orient = 'index')
+                df_list.append(result_df.T)
+
+        # save the result to object property
+        # wait to be written when simulation ends
+        self.result_list.append(pd.concat(df_list))
+
+        return
 
 class DAM_hybrid_tracking:
 

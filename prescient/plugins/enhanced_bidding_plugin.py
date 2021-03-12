@@ -124,14 +124,15 @@ def initialize_bidding_object(options, simulator):
     return
 prescient.plugins.register_initialization_callback(initialize_bidding_object)
 
-# def initialize_tracking_object(options, simulator):
-#
-#     # initialize the model class
-#     thermal_track = DAM_thermal_tracking(n_scenario=10)
-#     simulator.data_manager.extensions['thermal_track'] = thermal_track
-#
-#     return
-# prescient.plugins.register_initialization_callback(initialize_tracking_object)
+def initialize_tracking_object(options, simulator):
+
+    # initialize the model class
+    thermal_track = DAM_thermal_tracking(rts_gmlc_data_dir = options.rts_gmlc_data_dir,\
+                                         generators = [options.bidding_generator])
+    simulator.data_manager.extensions['thermal_track'] = thermal_track
+
+    return
+prescient.plugins.register_initialization_callback(initialize_tracking_object)
 
 def pass_bid_to_prescient(options, ruc_instance, ruc_date, bids):
 
@@ -182,14 +183,53 @@ def save_ruc_plan(options, simulator, ruc_plan, ruc_date, ruc_hour):
     pass
 prescient.plugins.register_after_ruc_generation_callback(save_ruc_plan)
 
+def assemble_sced_tracking_market_signals(options,simulator,sced_instance, hour):
+
+    ## TODO: make this in a for loop (imagine we have a list of bidding generators)
+    gen_name = options.bidding_generator
+
+    sced_dispatch = sced_instance.data['elements']['generator'][gen_name]['pg']['values']
+    current_ruc_dispatch = simulator.data_manager.ruc_market_active.thermal_gen_cleared_DA
+    if simulator.data_manager.ruc_market_pending is not None:
+        next_ruc_dispatch = simulator.data_manager.ruc_market_pending.thermal_gen_cleared_DA
+
+    # append the sced dispatch
+    market_signals = {gen_name:[sced_dispatch[0]]}
+
+    # append corresponding RUC dispatch
+    for t in range(hour+1, hour+options.sced_horizon):
+        if t > 23 and simulator.data_manager.ruc_market_pending is not None:
+            t = t % 24
+            dispatch = next_ruc_dispatch[(gen_name,t)]
+        elif t > 23 and simulator.data_manager.ruc_market_pending is None:
+            dispatch = sced_dispatch[t-hour]
+        else:
+            dispatch = current_ruc_dispatch[(gen_name,t)]
+        market_signals[gen_name].append(dispatch)
+
+    return market_signals
+
 def track_sced_signal(options, simulator, sced_instance):
 
-    ## TODO: actual tracking
+    current_date = simulator.time_manager.current_time.date
+    current_hour = simulator.time_manager.current_time.hour
 
-    ## TODO: record operation results
+    # unpack
+    thermal_track = simulator.data_manager.extensions['thermal_track']
 
-    ## update the tracking model
-    pass
+    # get market signals
+    market_signals = assemble_sced_tracking_market_signals(options = options, \
+                                                           simulator = simulator, \
+                                                           sced_instance = sced_instance, \
+                                                           hour = current_hour)
+
+    # actual tracking
+    thermal_track.pass_schedule_to_track(market_signals = market_signals, \
+                                         last_implemented_time_step = 0, \
+                                         date = current_date,\
+                                         hour = current_hour)
+
+    return
 prescient.plugins.register_after_operations_callback(track_sced_signal)
 
 def update_observed_thermal_dispatch(options, simulator, ops_stats):

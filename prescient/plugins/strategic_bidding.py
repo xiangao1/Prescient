@@ -72,13 +72,13 @@ class DAM_thermal_bidding:
 
     n_scenario = 10
 
-    def __init__(self,rts_gmlc_data_dir, price_forecast_dir,generators = None):
+    def __init__(self,rts_gmlc_data_dir, price_forecast_dir,horizon = 48,generators = None):
 
         self.price_forecast_dir = price_forecast_dir
 
         self.model_data = self.assemble_model_data(generator_names = generators, \
                                                    rts_gmlc_data_dir = rts_gmlc_data_dir)
-        self.model = self.build_thermal_bidding_model(plan_horizon = 48,
+        self.model = self.build_thermal_bidding_model(plan_horizon = horizon,
                                                       segment_number = 4,
                                                       n_scenario = 10)
 

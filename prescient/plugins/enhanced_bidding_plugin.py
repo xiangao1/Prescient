@@ -118,7 +118,8 @@ def initialize_bidding_object(options, simulator):
     # initialize the model class
     thermal_bid = DAM_thermal_bidding(rts_gmlc_data_dir = options.rts_gmlc_data_dir, \
                                       price_forecast_dir = options.price_forecast_dir,\
-                                      generators = [options.bidding_generator])
+                                      generators = [options.bidding_generator],\
+                                      horizon = options.ruc_horizon)
     simulator.data_manager.extensions['thermal_bid'] = thermal_bid
 
     return
@@ -128,6 +129,7 @@ def initialize_tracking_object(options, simulator):
 
     # initialize the model class
     thermal_track = DAM_thermal_tracking(rts_gmlc_data_dir = options.rts_gmlc_data_dir,\
+                                         tracking_horizon = options.sced_horizon,\
                                          generators = [options.bidding_generator])
     simulator.data_manager.extensions['thermal_track'] = thermal_track
 
@@ -214,7 +216,7 @@ def track_sced_signal(options, simulator, sced_instance):
     current_date = simulator.time_manager.current_time.date
     current_hour = simulator.time_manager.current_time.hour
 
-    # unpack
+    # unpack tracker
     thermal_track = simulator.data_manager.extensions['thermal_track']
 
     # get market signals
@@ -234,31 +236,15 @@ prescient.plugins.register_after_operations_callback(track_sced_signal)
 
 def update_observed_thermal_dispatch(options, simulator, ops_stats):
 
-    '''
-    current_time = simulator.time_manager.current_time
-    h = current_time.hour
-    date_as_string = current_time.date
-    date_idx = simulator.time_manager.dates_to_simulate.index(date_as_string)
+    # unpack tracker
+    thermal_track = simulator.data_manager.extensions['thermal_track']
+    g = options.bidding_generator
+    ops_stats.observed_thermal_dispatch_levels[g] = thermal_track.get_last_delivered_power(generator = g)
 
-    total_power_delivered_arr = simulator.data_manager.extensions['total_power_delivered_arr']
-
-    if options.track_ruc_signal:
-        print('Making changes in observed power output using tracking RUC model.')
-        g = options.bidding_generator
-        ops_stats.observed_thermal_dispatch_levels[g] = total_power_delivered_arr[h,date_idx]
-
-    elif options.track_sced_signal:
-        print('Making changes in observed power output using tracking SCED model.')
-        g = options.bidding_generator
-        ops_stats.observed_thermal_dispatch_levels[g] = total_power_delivered_arr[h,date_idx]
-    '''
-    pass
+    return
 prescient.plugins.register_update_operations_stats_callback(update_observed_thermal_dispatch)
 
-
 def after_ruc_activation(options, simulator):
-
-    # TODO: change the ruc plan in tracking object
 
     # change bids
     current_bids = simulator.data_manager.extensions['next_bids']

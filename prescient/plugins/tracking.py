@@ -595,6 +595,9 @@ class DAM_thermal_tracking:
 
         return
 
+    def get_last_delivered_power(self,generator):
+        return pyo.value(self.model.pre_P_T[generator])
+
 class DAM_hybrid_tracking:
 
     def __init__(self,rts_gmlc_data_dir, generators = None):

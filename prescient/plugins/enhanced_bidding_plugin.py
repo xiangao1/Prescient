@@ -150,16 +150,86 @@ def pass_bid_to_prescient(options, ruc_instance, ruc_date, bids):
 
     return
 
+def assemble_project_tracking_signal(options, simulator, hour):
+
+     ## TODO: make this in a for loop (imagine we have a list of bidding generators)
+     gen_name = options.bidding_generator
+
+     current_ruc_dispatch = simulator.data_manager.ruc_market_active.thermal_gen_cleared_DA
+
+     market_signals = {gen_name:[]}
+
+     # append corresponding RUC dispatch
+     for t in range(hour, hour+options.sced_horizon):
+         if t >= 23:
+             dispatch = current_ruc_dispatch[(gen_name,23)]
+         else:
+             dispatch = current_ruc_dispatch[(gen_name,t)]
+         market_signals[gen_name].append(dispatch)
+
+     return market_signals
+
+def get_full_projected_trajectory(options, simulator):
+
+    # unpack tracker
+    thermal_track = simulator.data_manager.extensions['thermal_track']
+
+    full_projected_trajectory = {}
+
+    for stat in thermal_track.daily_stats:
+        full_projected_trajectory[stat] = {}
+
+        ## TODO: we can have a loop here
+        gen_name = options.bidding_generator
+
+        # merge the trajectory
+        full_projected_trajectory[stat][gen_name] = thermal_track.daily_stats.get(stat)[gen_name] + \
+                                                   thermal_track.projection.get(stat)[gen_name]
+
+    thermal_track.clear_projection()
+
+    return full_projected_trajectory
+
+def project_tracking_trajectory(options, simulator, ruc_hour):
+
+    # unpack tracker
+    thermal_track = simulator.data_manager.extensions['thermal_track']
+
+    projection_m = thermal_track.clone_tracking_model()
+
+    for hour in range(ruc_hour, 24):
+
+        # assemble market_signals
+        market_signals = assemble_project_tracking_signal(options = options, \
+                                                          simulator = simulator, \
+                                                          hour = hour)
+        # solve tracking
+        thermal_track.pass_schedule_to_track(m = projection_m,\
+                                             market_signals = market_signals, \
+                                             last_implemented_time_step = 0,\
+                                             hour = hour,\
+                                             projection = True)
+
+    return get_full_projected_trajectory(options,simulator)
+
 def bid_into_DAM(options, simulator, ruc_instance, ruc_date, ruc_hour):
 
     # check if it is first day
     is_first_day = simulator.time_manager.current_time is None
 
-    if not is_first_day:
-        # TODO: update the model based on tracking model
-        pass
-
+    # unpack bid object
     thermal_bid = simulator.data_manager.extensions['thermal_bid']
+
+    if not is_first_day:
+
+        # solve rolling horizon to get the trajectory
+        full_projected_trajectory = project_tracking_trajectory(options, \
+                                                                simulator, \
+                                                                ruc_hour)
+        # update the bidding model
+        thermal_bid.update_model(implemented_power_output = full_projected_trajectory['power'],\
+                                 implemented_shut_down = full_projected_trajectory['shut_down'], \
+                                 implemented_start_up = full_projected_trajectory['start_up'])
 
     # generate bids
     bids = thermal_bid.stochastic_bidding(ruc_date)
@@ -226,7 +296,8 @@ def track_sced_signal(options, simulator, sced_instance):
                                                            hour = current_hour)
 
     # actual tracking
-    thermal_track.pass_schedule_to_track(market_signals = market_signals, \
+    thermal_track.pass_schedule_to_track(m = thermal_track.model,\
+                                         market_signals = market_signals, \
                                          last_implemented_time_step = 0, \
                                          date = current_date,\
                                          hour = current_hour)
@@ -260,131 +331,8 @@ def write_customize_results(options, simulator):
     '''
     pass
 prescient.plugins.register_after_simulation_callback(write_customize_results)
+
 '''
-def get_gpoints_gvalues(cost_curve_store_dir,date,gen_name = '102_STEAM_3',horizon = 24,verbose = False):
-
-    gpoints = {}
-    gvalues = {}
-
-    # read the csv file
-    for h in range(horizon):
-
-        if verbose:
-            print("")
-            print("Getting cost curve from Date: {}, Hour: {}.".format(date,h))
-
-        gpoints[h] = list(read_csv(cost_curve_store_dir+gen_name+\
-        '_date={}_hour={}_cost_curve.csv'.format(date,h),header = None).values[:,0])
-        gvalues[h] = list(read_csv(cost_curve_store_dir+gen_name+\
-        '_date={}_hour={}_cost_curve.csv'.format(date,h),header = None).values[:,1])
-
-    return gpoints,gvalues
-
-def initialize_plugin(options, simulator):
-    # Xian: add 2 np arrays to store RUC and SCED schedules for the interested generator
-    simulator.data_manager.extensions['ruc_schedule_arr'] = np.zeros((24,options.num_days))
-    simulator.data_manager.extensions['sced_schedule_arr'] = np.zeros((24,options.num_days))
-
-    # Xian: add 2 np arrays to store
-    # 1. the actual total power output from the hybrid system
-    # 2. power output from the thermal generator in the hybrid system
-    simulator.data_manager.extensions['total_power_delivered_arr'] = np.zeros((24,options.num_days)) # P_R
-    simulator.data_manager.extensions['thermal_power_delivered_arr'] = np.zeros((24,options.num_days)) # P_G
-    simulator.data_manager.extensions['thermal_power_generated_arr'] = np.zeros((24,options.num_days)) # P_T
-
-    # initialize the model class
-    thermal_bid = DAM_thermal_bidding(n_scenario=10)
-    simulator.data_manager.extensions['thermal_bid'] = thermal_bid
-
-    first_date = str(dateutil.parser.parse(options.start_date).date())
-
-    # build bidding model
-    if options.bidding:
-        m_bid = thermal_bid.create_bidding_model(generator = options.bidding_generator)
-        price_forecast_dir = '../../prescient/plugins/price_forecasts/'
-        cost_curve_store_dir = '../../prescient/plugins/cost_curves/'
-
-        simulator.data_manager.extensions['cost_curve_store_dir'] = cost_curve_store_dir
-        simulator.data_manager.extensions['price_forecast_dir'] = price_forecast_dir
-        simulator.data_manager.extensions['m_bid'] = m_bid
-
-    # build tracking model
-    if options.track_ruc_signal:
-        print('Building a track model for RUC signals.')
-        simulator.data_manager.extensions['m_track_ruc'] = thermal_bid.build_tracking_model(options.ruc_horizon, \
-                                                                                            generator = options.bidding_generator,\
-                                                                                            track_type = 'RUC', \
-                                                                                            hybrid = options.hybrid_tracking)
-
-    elif options.track_sced_signal:
-        print('Building a track model for SCED signals.')
-        m_track_sced = thermal_bid.build_tracking_model(options.sced_horizon,\
-                                                        generator = options.bidding_generator,\
-                                                        track_type = 'SCED',\
-                                                        hybrid = options.hybrid_tracking)
-        simulator.data_manager.extensions['m_track_sced'] = m_track_sced
-
-
-        # initialize a list/array to record the power output of sced tracking
-        # model in real-time, so it can update the initial condition properly
-        # every hour
-        simulator.data_manager.extensions['sced_tracker_power_record'] = \
-            {options.bidding_generator:
-             np.repeat(pyo.value(m_track_sced.pre_pow[options.bidding_generator]),\
-                       pyo.value(m_track_sced.pre_up_hour[options.bidding_generator]))
-            }
-
-prescient.plugins.register_initialization_callback(initialize_plugin)
-
-def tweak_ruc_before_solve(options, simulator, ruc_instance, ruc_date, ruc_hour):
-
-    if not options.bidding:
-        return
-
-    print("Getting cost cuves for UC.\n")
-    current_time = simulator.time_manager.current_time
-
-    thermalBid = simulator.data_manager.extensions['thermal_bid']
-    m_bid = simulator.data_manager.extensions['m_bid']
-
-    price_forecast_dir = simulator.data_manager.extensions['price_forecast_dir']
-    cost_curve_store_dir = simulator.data_manager.extensions['cost_curve_store_dir']
-
-    if current_time is not None:
-        date_as_string = ruc_date
-
-        current_date = current_time.date
-        date_idx = simulator.time_manager.dates_to_simulate.index(current_date)
-
-        # Xian: solve bidding problem here
-        ruc_schedule_arr = simulator.data_manager.extensions['ruc_schedule_arr'][:,date_idx]
-        thermalBid.update_model_params(m_bid,\
-                                       ruc_schedule_arr,\
-                                       unit = options.bidding_generator)
-        thermalBid.reset_constraints(m_bid,options.ruc_horizon)
-
-    else: # first RUC solve
-        date_as_string = ruc_date
-
-    # solve the bidding model for the first simulation day
-    thermalBid.stochastic_bidding(m_bid,price_forecast_dir,cost_curve_store_dir,date_as_string)
-
-    gen_name = options.bidding_generator
-    gpoints, gvalues = get_gpoints_gvalues(cost_curve_store_dir,\
-                                            date=date_as_string,\
-                                            gen_name=gen_name,\
-                                            horizon = options.ruc_horizon)
-    gen_dict = ruc_instance.data['elements']['generator'][gen_name]
-
-    p_cost = [[(gpnt, gval) for gpnt, gval in zip(gpoints[t], gvalues[t])] for t in range(options.ruc_horizon)]
-
-    gen_dict['p_cost'] = {'data_type': 'time_series',
-                          'values': [{'data_type' : 'cost_curve',
-                                     'cost_curve_type':'piecewise',
-                                     'values':p_cost[t]} for t in range(options.ruc_horizon)]
-                         }
-
-prescient.plugins.register_before_ruc_solve_callback(tweak_ruc_before_solve)
 
 def after_ruc(options, simulator, ruc_plan, ruc_date, ruc_hour):
 
@@ -474,107 +422,4 @@ def tweak_sced_before_solve(options, simulator, sced_instance):
                          }
 
 prescient.plugins.register_before_operations_solve_callback(tweak_sced_before_solve)
-
-def after_sced(options, simulator, sced_instance):
-
-    current_time = simulator.time_manager.current_time
-    h = current_time.hour
-    date_as_string = current_time.date
-
-    date_idx = simulator.time_manager.dates_to_simulate.index(date_as_string)
-
-    gen_name = options.bidding_generator
-    g_dict = sced_instance.data['elements']['generator'][gen_name]
-    sced_dispatch_level = {gen_name: g_dict['pg']['values']}
-
-    sced_schedule_arr = simulator.data_manager.extensions['sced_schedule_arr']
-    sced_schedule_arr[h,date_idx] = sced_dispatch_level[options.bidding_generator][0]
-
-    ## TODO: pass the real-time price into the function here
-    # get lmps in the current planning horizon
-    # get_lmps_for_deterministic_sced(lmp_sced_instance, max_bus_label_length=max_bus_label_length)
-    # currently we don't need lmp, because the objective is to minimize the cost
-
-    if options.track_sced_signal:
-        ruc_dispatch_level_current = simulator.data_manager.extensions['ruc_dispatch_level_current']
-        # slice the ruc dispatch for function calling below
-        ruc_dispatch_level_for_current_sced_track = {options.bidding_generator:\
-                        ruc_dispatch_level_current[gen_name][h:h+options.sced_horizon]}
-
-        thermalBid = simulator.data_manager.extensions['thermal_bid']
-        m_track_sced = simulator.data_manager.extensions['m_track_sced']
-        thermalBid.pass_schedule_to_track_and_solve(m_track_sced,\
-                                                    ruc_dispatch_level_for_current_sced_track,\
-                                                    SCED_dispatch = sced_dispatch_level,\
-                                                    deviation_weight = options.deviation_weight, \
-                                                    ramping_weight = options.ramping_weight,\
-                                                    cost_weight = options.cost_weight)
-
-        # record the track power output profile
-        if options.hybrid_tracking == False:
-            track_gen_pow_sced = thermalBid.extract_pow_s_s(m_track_sced,\
-                                                            horizon = options.sced_horizon, \
-                                                            verbose = False)
-            thermal_track_gen_pow_sced = track_gen_pow_sced
-            thermal_generated_sced = track_gen_pow_sced
-        else:
-            # need to extract P_R and P_T
-            # for control power recording and updating the model
-            track_gen_pow_sced, \
-            thermal_track_gen_pow_sced, \
-            thermal_generated_sced = thermalBid.extract_pow_s_s(m_track_sced,\
-                                                                horizon = options.sced_horizon,\
-                                                                hybrid = True,\
-                                                                verbose = False)
-
-        # record the total power delivered and thermal power delivered
-        total_power_delivered_arr = simulator.data_manager.extensions['total_power_delivered_arr']
-        thermal_power_delivered_arr = simulator.data_manager.extensions['thermal_power_delivered_arr']
-        thermal_power_generated_arr = simulator.data_manager.extensions['thermal_power_generated_arr']
-        total_power_delivered_arr[h,date_idx] = track_gen_pow_sced[options.bidding_generator][0]
-        thermal_power_delivered_arr[h,date_idx] = thermal_track_gen_pow_sced[options.bidding_generator][0]
-        thermal_power_generated_arr[h,date_idx] = thermal_generated_sced[options.bidding_generator][0]
-
-        # use the schedule for this step to update the recorder
-        sced_tracker_power_record = simulator.data_manager.extensions['sced_tracker_power_record']
-        sced_tracker_power_record[options.bidding_generator][:-1] = sced_tracker_power_record[options.bidding_generator][1:]
-        sced_tracker_power_record[options.bidding_generator][-1] = thermal_generated_sced[options.bidding_generator][0]
-
-        # update the track model
-        thermalBid.update_model_params(m_track_sced,\
-                                       sced_tracker_power_record[options.bidding_generator], \
-                                       unit = options.bidding_generator,\
-                                       hybrid = options.hybrid_tracking)
-        thermalBid.reset_constraints(m_track_sced,options.sced_horizon)
-
-prescient.plugins.register_after_operations_callback(after_sced)
-
-def update_observed_thermal_dispatch(options, simulator, ops_stats):
-
-    current_time = simulator.time_manager.current_time
-    h = current_time.hour
-    date_as_string = current_time.date
-    date_idx = simulator.time_manager.dates_to_simulate.index(date_as_string)
-
-    total_power_delivered_arr = simulator.data_manager.extensions['total_power_delivered_arr']
-
-    if options.track_ruc_signal:
-        print('Making changes in observed power output using tracking RUC model.')
-        g = options.bidding_generator
-        ops_stats.observed_thermal_dispatch_levels[g] = total_power_delivered_arr[h,date_idx]
-
-    elif options.track_sced_signal:
-        print('Making changes in observed power output using tracking SCED model.')
-        g = options.bidding_generator
-        ops_stats.observed_thermal_dispatch_levels[g] = total_power_delivered_arr[h,date_idx]
-
-prescient.plugins.register_update_operations_stats_callback(update_observed_thermal_dispatch)
-
-def after_ruc_activation(options, simulator):
-
-    simulator.data_manager.extensions['ruc_dispatch_level_current'] = \
-            simulator.data_manager.extensions['ruc_dispatch_level_for_next_period']
-    simulator.data_manager.extensions['ruc_dispatch_level_for_next_period'] = None
-
-prescient.plugins.register_after_ruc_activation_callback(after_ruc_activation)
 '''

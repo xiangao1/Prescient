@@ -75,6 +75,9 @@ class DAM_thermal_tracking:
 
         self.result_list = []
 
+        self.daily_stats = {}
+        self.projection = {}
+
     @staticmethod
     def assemble_model_data(generator_names, rts_gmlc_data_dir, **kwargs):
 
@@ -458,17 +461,18 @@ class DAM_thermal_tracking:
      return
 
     def pass_schedule_to_track(self, \
+                               m,\
                                market_signals, \
                                last_implemented_time_step = 0, \
                                date = None,\
                                hour = None,\
-                               solver = None):
+                               solver = None,
+                               projection = False):
 
         '''
         market_signals: {gen: []}
         '''
 
-        m = self.model
         for unit in m.UNITS:
             for t in m.HOUR:
                 m.power_dispatch[unit,t] = market_signals[unit][t]
@@ -479,14 +483,32 @@ class DAM_thermal_tracking:
         # solve the model
         solver.solve(m,tee=True)
 
-        # append the implemented stats to a class property
-        self.record_results(market_signals = market_signals,\
-                            date = date, \
-                            hour = hour)
+        if projection:
+            self._record_projection(m = m,\
+                                    last_implemented_time_step = last_implemented_time_step)
+        else:
+            # append the implemented stats to a class property
+            self.record_results(m = m,\
+                                market_signals = market_signals,\
+                                date = date, \
+                                hour = hour)
+
+            self._record_daily_stats(m = m,\
+                                     last_implemented_time_step = last_implemented_time_step)
 
         # update the model
-        self.update_model(last_implemented_time_step = last_implemented_time_step)
+        self.update_model(m,last_implemented_time_step = last_implemented_time_step)
 
+        return
+
+    def clone_tracking_model(self):
+        return self.model.clone()
+
+    def clear_projection(self):
+
+        for stat in self.projection:
+            for gen in self.projection[stat]:
+                self.projection[stat][gen].clear()
         return
 
     @staticmethod
@@ -537,20 +559,52 @@ class DAM_thermal_tracking:
 
         return
 
-    def update_model(self,last_implemented_time_step = 0):
+    def update_model(self,m,last_implemented_time_step = 0):
 
-        self._update_UT_DT(self.model,last_implemented_time_step = last_implemented_time_step)
-        self._update_power(self.model,last_implemented_time_step = last_implemented_time_step)
+        self._update_UT_DT(m,last_implemented_time_step = last_implemented_time_step)
+        self._update_power(m,last_implemented_time_step = last_implemented_time_step)
 
         return
 
-    def record_results(self, market_signals, date = None, hour = None, **kwargs):
+    def _record_daily_stats(self,m,last_implemented_time_step=0):
 
-        '''
-        market_signals: {generator: {DA_dispatches: [], RT_dispatches; [], DA_LMP: [], RT_LMP; []}}
-        use queues, so we can pop the first one
-        '''
-        m = self.model
+        stats_var_dict = {'power': m.P_T, \
+                          'shut_down': m.shut_dw,\
+                          'start_up': m.start_up}
+
+        for s in stats_var_dict:
+            s_dict = self.daily_stats.setdefault(s,{})
+
+            for g in m.UNITS:
+                g_stat_list = s_dict.setdefault(g,[])
+
+                # new day: clean the list
+                if len(g_stat_list) >= 24:
+                    g_stat_list.clear()
+
+                for t in range(last_implemented_time_step + 1):
+                    g_stat_list.append(round(pyo.value(stats_var_dict[s][g,t]),2))
+
+        return
+
+    def _record_projection(self,m,last_implemented_time_step=0):
+
+        stats_var_dict = {'power': m.P_T, \
+                          'shut_down': m.shut_dw,\
+                          'start_up': m.start_up}
+
+        for s in stats_var_dict:
+            s_dict = self.projection.setdefault(s,{})
+
+            for g in m.UNITS:
+                g_stat_list = s_dict.setdefault(g,[])
+
+                for t in range(last_implemented_time_step + 1):
+                    g_stat_list.append(round(pyo.value(stats_var_dict[s][g,t]),2))
+
+        return
+
+    def record_results(self, m, market_signals, date = None, hour = None, **kwargs):
 
         df_list = []
         for generator in m.UNITS:

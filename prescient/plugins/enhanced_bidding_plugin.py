@@ -91,11 +91,6 @@ prescient.plugins.add_custom_commandline_option(opt)
 
 from strategic_bidding import DAM_thermal_bidding
 from tracking import DAM_thermal_tracking
-import pyomo.environ as pyo
-import dateutil.parser
-import numpy as np
-from pandas import read_csv
-import os
 
 def initialize_customized_results(options, simulator):
 

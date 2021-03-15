@@ -120,7 +120,9 @@ def initialize_bidding_object(options, simulator):
                                       price_forecast_dir = options.price_forecast_dir,\
                                       generators = [options.bidding_generator],\
                                       horizon = options.ruc_horizon)
-    simulator.data_manager.extensions['bidder'] = bidder
+
+    plugin_dict = simulator.data_manager.extensions.setdefault('plugin_objects',{})
+    plugin_dict['bidder'] = bidder
 
     return
 prescient.plugins.register_initialization_callback(initialize_bidding_object)
@@ -131,7 +133,9 @@ def initialize_tracking_object(options, simulator):
     tracker = DAM_thermal_tracking(rts_gmlc_data_dir = options.rts_gmlc_data_dir,\
                                          tracking_horizon = options.sced_horizon,\
                                          generators = [options.bidding_generator])
-    simulator.data_manager.extensions['tracker'] = tracker
+
+    plugin_dict = simulator.data_manager.extensions.setdefault('plugin_objects',{})
+    plugin_dict['tracker'] = tracker
 
     return
 prescient.plugins.register_initialization_callback(initialize_tracking_object)
@@ -172,7 +176,7 @@ def assemble_project_tracking_signal(options, simulator, hour):
 def get_full_projected_trajectory(options, simulator):
 
     # unpack tracker
-    tracker = simulator.data_manager.extensions['tracker']
+    tracker = simulator.data_manager.extensions['plugin_objects']['tracker']
 
     full_projected_trajectory = {}
 
@@ -193,7 +197,7 @@ def get_full_projected_trajectory(options, simulator):
 def project_tracking_trajectory(options, simulator, ruc_hour):
 
     # unpack tracker
-    tracker = simulator.data_manager.extensions['tracker']
+    tracker = simulator.data_manager.extensions['plugin_objects']['tracker']
 
     projection_m = tracker.clone_tracking_model()
 
@@ -218,7 +222,7 @@ def bid_into_DAM(options, simulator, ruc_instance, ruc_date, ruc_hour):
     is_first_day = simulator.time_manager.current_time is None
 
     # unpack bid object
-    bidder = simulator.data_manager.extensions['bidder']
+    bidder = simulator.data_manager.extensions['plugin_objects']['bidder']
 
     if not is_first_day:
 
@@ -287,7 +291,7 @@ def track_sced_signal(options, simulator, sced_instance):
     current_hour = simulator.time_manager.current_time.hour
 
     # unpack tracker
-    tracker = simulator.data_manager.extensions['tracker']
+    tracker = simulator.data_manager.extensions['plugin_objects']['tracker']
 
     # get market signals
     market_signals = assemble_sced_tracking_market_signals(options = options, \
@@ -308,7 +312,7 @@ prescient.plugins.register_after_operations_callback(track_sced_signal)
 def update_observed_thermal_dispatch(options, simulator, ops_stats):
 
     # unpack tracker
-    tracker = simulator.data_manager.extensions['tracker']
+    tracker = simulator.data_manager.extensions['plugin_objects']['tracker']
     g = options.bidding_generator
     ops_stats.observed_thermal_dispatch_levels[g] = tracker.get_last_delivered_power(generator = g)
 
@@ -329,7 +333,11 @@ def write_plugin_results(options, simulator):
     '''
     write results in bidding and tracking objects
     '''
-    pass
+
+    for key, plugins in simulator.data_manager.extensions['plugin_objects'].items():
+        plugins.write_results(path = options.output_directory)
+
+    return
 prescient.plugins.register_after_simulation_callback(write_plugin_results)
 
 '''

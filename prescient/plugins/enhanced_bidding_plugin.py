@@ -117,9 +117,9 @@ def initialize_bidding_object(options, simulator):
 
     # initialize the model class
     bidder = DAM_thermal_bidding(rts_gmlc_data_dir = options.rts_gmlc_data_dir, \
-                                      price_forecast_dir = options.price_forecast_dir,\
-                                      generators = [options.bidding_generator],\
-                                      horizon = options.ruc_horizon)
+                                 price_forecast_dir = options.price_forecast_dir,\
+                                 generators = [options.bidding_generator],\
+                                 horizon = options.ruc_horizon)
 
     plugin_dict = simulator.data_manager.extensions.setdefault('plugin_objects',{})
     plugin_dict['bidder'] = bidder
@@ -131,8 +131,8 @@ def initialize_tracking_object(options, simulator):
 
     # initialize the model class
     tracker = DAM_thermal_tracking(rts_gmlc_data_dir = options.rts_gmlc_data_dir,\
-                                         tracking_horizon = options.sced_horizon,\
-                                         generators = [options.bidding_generator])
+                                   tracking_horizon = options.sced_horizon,\
+                                   generators = [options.bidding_generator])
 
     plugin_dict = simulator.data_manager.extensions.setdefault('plugin_objects',{})
     plugin_dict['tracker'] = tracker
@@ -246,18 +246,8 @@ def bid_into_DAM(options, simulator, ruc_instance, ruc_date, ruc_hour):
     # pass to prescient
     pass_bid_to_prescient(options, ruc_instance, ruc_date, bids)
 
-    # record bids
-    # bidder.record_bids()
-
     return
 prescient.plugins.register_before_ruc_solve_callback(bid_into_DAM)
-
-def save_ruc_plan(options, simulator, ruc_plan, ruc_date, ruc_hour):
-
-    # save the ruc plan as a property of tracking object
-
-    pass
-prescient.plugins.register_after_ruc_generation_callback(save_ruc_plan)
 
 def assemble_sced_tracking_market_signals(options,simulator,sced_instance, hour):
 
@@ -339,95 +329,3 @@ def write_plugin_results(options, simulator):
 
     return
 prescient.plugins.register_after_simulation_callback(write_plugin_results)
-
-'''
-
-def after_ruc(options, simulator, ruc_plan, ruc_date, ruc_hour):
-
-    ruc_instance = ruc_plan.deterministic_ruc_instance
-
-    date_idx = simulator.time_manager.dates_to_simulate.index(ruc_date)
-
-    gen_name = options.bidding_generator
-
-    g_dict = ruc_instance.data['elements']['generator'][gen_name]
-    ruc_dispatch_level_for_next_period = {gen_name: g_dict['pg']['values']}
-
-    is_first_date = (date_idx==0)
-    if is_first_date:
-        simulator.data_manager.extensions['ruc_dispatch_level_current'] = \
-                ruc_dispatch_level_for_next_period
-    else:
-        simulator.data_manager.extensions['ruc_dispatch_level_for_next_period'] = \
-                ruc_dispatch_level_for_next_period
-
-    ruc_schedule_arr = simulator.data_manager.extensions['ruc_schedule_arr']
-
-    # record the ruc signal
-    ruc_schedule_arr[:,date_idx] = np.array(ruc_dispatch_level_for_next_period[options.bidding_generator]).flatten()[:24]
-
-    if options.track_ruc_signal:
-
-        m_track_ruc = simulator.data_manager.extensions['m_track_ruc']
-        thermalBid = simulator.data_manager.extensions['thermal_bid']
-
-        thermalBid.pass_schedule_to_track_and_solve(m_track_ruc,\
-                                                    ruc_dispatch_level_for_next_period,\
-                                                    RT_price=None,\
-                                                    deviation_weight = options.deviation_weight, \
-                                                    ramping_weight = options.ramping_weight,\
-                                                    cost_weight = options.cost_weight)
-
-
-        # record the track power output profile
-        if options.hybrid_tracking == False:
-            track_gen_pow_ruc = thermalBid.extract_pow_s_s(m_track_ruc, \
-                                                           horizon = 24, \
-                                                           verbose = False)
-            thermal_track_gen_pow_ruc = track_gen_pow_ruc
-            thermal_generated_ruc = track_gen_pow_ruc
-        else:
-            track_gen_pow_ruc,\
-            thermal_track_gen_pow_ruc,\
-            thermal_generated_ruc = thermalBid.extract_pow_s_s(m_track_ruc, \
-                                                               horizon = 24, \
-                                                               hybrid = True, \
-                                                               verbose = False)
-
-        # record the total power delivered and thermal power delivered
-        total_power_delivered_arr = simulator.data_manager.extensions['total_power_delivered_arr']
-        thermal_power_delivered_arr = simulator.data_manager.extensions['thermal_power_delivered_arr']
-        thermal_power_generated_arr = simulator.data_manager.extensions['thermal_power_generated_arr']
-
-        total_power_delivered_arr[:,date_idx] = track_gen_pow_ruc[options.bidding_generator]
-        thermal_power_delivered_arr[:,date_idx] = thermal_track_gen_pow_ruc[options.bidding_generator]
-        thermal_power_generated_arr[:,date_idx] = thermal_generated_ruc[options.bidding_generator]
-
-        # update the track model
-        thermalBid.update_model_params(m_track_ruc,\
-                                       thermal_generated_ruc[options.bidding_generator],\
-                                       unit = options.bidding_generator,\
-                                       hybrid = options.hybrid_tracking)
-        thermalBid.reset_constraints(m_track_ruc,options.ruc_horizon)
-
-prescient.plugins.register_after_ruc_generation_callback(after_ruc)
-
-def tweak_sced_before_solve(options, simulator, sced_instance):
-    current_time = simulator.time_manager.current_time
-    hour = current_time.hour
-    date_as_string = current_time.date
-
-    gen_name = options.bidding_generator
-    gpoints, gvalues = get_gpoints_gvalues(simulator.data_manager.extensions['cost_curve_store_dir'],
-                                            date=date_as_string, gen_name=gen_name)
-    gen_dict = sced_instance.data['elements']['generator'][gen_name]
-
-    p_cost = [(gpnt, gval) for gpnt, gval in zip(gpoints[hour], gvalues[hour])]
-
-    gen_dict['p_cost'] = {'data_type' : 'cost_curve',
-                          'cost_curve_type':'piecewise',
-                          'values':p_cost
-                         }
-
-prescient.plugins.register_before_operations_solve_callback(tweak_sced_before_solve)
-'''

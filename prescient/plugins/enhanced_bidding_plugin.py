@@ -140,7 +140,7 @@ def initialize_tracking_object(options, simulator):
     return
 prescient.plugins.register_initialization_callback(initialize_tracking_object)
 
-def pass_bid_to_prescient(options, ruc_instance, ruc_date, bids):
+def pass_DA_bid_to_prescient(options, ruc_instance, ruc_date, bids):
 
     gen_name = options.bidding_generator
     gen_dict = ruc_instance.data['elements']['generator'][gen_name]
@@ -151,7 +151,6 @@ def pass_bid_to_prescient(options, ruc_instance, ruc_date, bids):
                                      'cost_curve_type':'piecewise',
                                      'values':p_cost[t]} for t in range(options.ruc_horizon)]
                          }
-
     return
 
 def assemble_project_tracking_signal(options, simulator, hour):
@@ -244,10 +243,35 @@ def bid_into_DAM(options, simulator, ruc_instance, ruc_date, ruc_hour):
         simulator.data_manager.extensions['next_bids'] = bids
 
     # pass to prescient
-    pass_bid_to_prescient(options, ruc_instance, ruc_date, bids)
+    pass_DA_bid_to_prescient(options, ruc_instance, ruc_date, bids)
 
     return
 prescient.plugins.register_before_ruc_solve_callback(bid_into_DAM)
+
+def pass_RT_bid_to_prescient(options, simulator, sced_instance, bids, hour):
+
+    gen_name = options.bidding_generator
+    gen_dict = sced_instance.data['elements']['generator'][gen_name]
+
+    p_cost = list(bids[hour][gen_name].items())
+    gen_dict['p_cost'] = {'data_type' : 'cost_curve',
+                          'cost_curve_type':'piecewise',
+                          'values':p_cost
+                         }
+    return
+
+def bid_into_RTM(options, simulator, sced_instance):
+
+    # fetch the bids
+    hour = simulator.time_manager.current_time.hour
+    bids = simulator.data_manager.extensions['current_bids']
+
+    # pass bids into sced model
+    pass_RT_bid_to_prescient(options, simulator, sced_instance, bids, hour)
+
+    return
+
+prescient.plugins.register_before_operations_solve_callback(bid_into_RTM)
 
 def assemble_sced_tracking_market_signals(options,simulator,sced_instance, hour):
 

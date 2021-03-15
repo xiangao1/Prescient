@@ -1,6 +1,7 @@
 import pandas as pd
 import pyomo.environ as pyo
 from collections import deque
+import os
 
 def get_data_given(df, bus=None, date=None, hour=None, generator=None, fuel_type=None):
 
@@ -651,6 +652,14 @@ class DAM_thermal_tracking:
 
     def get_last_delivered_power(self,generator):
         return pyo.value(self.model.pre_P_T[generator])
+
+    def write_results(self,path):
+
+        print("")
+        print('Saving tracking results to disk...')
+        pd.concat(self.result_list).to_csv(os.path.join(path,'tracking_detail.csv'), \
+                                           index = False)
+        return
 
 class DAM_hybrid_tracking:
 

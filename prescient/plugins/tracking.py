@@ -489,7 +489,7 @@ class DAM_thermal_tracking:
                                     last_implemented_time_step = last_implemented_time_step)
         else:
             # append the implemented stats to a class property
-            self.record_results(m = m,\
+            self._record_results(m = m,\
                                 market_signals = market_signals,\
                                 date = date, \
                                 hour = hour)
@@ -605,7 +605,7 @@ class DAM_thermal_tracking:
 
         return
 
-    def record_results(self, m, market_signals, date = None, hour = None, **kwargs):
+    def _record_results(self, m, market_signals, date = None, hour = None, **kwargs):
 
         df_list = []
         for generator in m.UNITS:

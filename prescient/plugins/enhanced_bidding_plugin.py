@@ -116,11 +116,11 @@ prescient.plugins.register_initialization_callback(initialize_customized_results
 def initialize_bidding_object(options, simulator):
 
     # initialize the model class
-    thermal_bid = DAM_thermal_bidding(rts_gmlc_data_dir = options.rts_gmlc_data_dir, \
+    bidder = DAM_thermal_bidding(rts_gmlc_data_dir = options.rts_gmlc_data_dir, \
                                       price_forecast_dir = options.price_forecast_dir,\
                                       generators = [options.bidding_generator],\
                                       horizon = options.ruc_horizon)
-    simulator.data_manager.extensions['thermal_bid'] = thermal_bid
+    simulator.data_manager.extensions['bidder'] = bidder
 
     return
 prescient.plugins.register_initialization_callback(initialize_bidding_object)
@@ -128,10 +128,10 @@ prescient.plugins.register_initialization_callback(initialize_bidding_object)
 def initialize_tracking_object(options, simulator):
 
     # initialize the model class
-    thermal_track = DAM_thermal_tracking(rts_gmlc_data_dir = options.rts_gmlc_data_dir,\
+    tracker = DAM_thermal_tracking(rts_gmlc_data_dir = options.rts_gmlc_data_dir,\
                                          tracking_horizon = options.sced_horizon,\
                                          generators = [options.bidding_generator])
-    simulator.data_manager.extensions['thermal_track'] = thermal_track
+    simulator.data_manager.extensions['tracker'] = tracker
 
     return
 prescient.plugins.register_initialization_callback(initialize_tracking_object)
@@ -172,30 +172,30 @@ def assemble_project_tracking_signal(options, simulator, hour):
 def get_full_projected_trajectory(options, simulator):
 
     # unpack tracker
-    thermal_track = simulator.data_manager.extensions['thermal_track']
+    tracker = simulator.data_manager.extensions['tracker']
 
     full_projected_trajectory = {}
 
-    for stat in thermal_track.daily_stats:
+    for stat in tracker.daily_stats:
         full_projected_trajectory[stat] = {}
 
         ## TODO: we can have a loop here
         gen_name = options.bidding_generator
 
         # merge the trajectory
-        full_projected_trajectory[stat][gen_name] = thermal_track.daily_stats.get(stat)[gen_name] + \
-                                                   thermal_track.projection.get(stat)[gen_name]
+        full_projected_trajectory[stat][gen_name] = tracker.daily_stats.get(stat)[gen_name] + \
+                                                   tracker.projection.get(stat)[gen_name]
 
-    thermal_track.clear_projection()
+    tracker.clear_projection()
 
     return full_projected_trajectory
 
 def project_tracking_trajectory(options, simulator, ruc_hour):
 
     # unpack tracker
-    thermal_track = simulator.data_manager.extensions['thermal_track']
+    tracker = simulator.data_manager.extensions['tracker']
 
-    projection_m = thermal_track.clone_tracking_model()
+    projection_m = tracker.clone_tracking_model()
 
     for hour in range(ruc_hour, 24):
 
@@ -204,11 +204,11 @@ def project_tracking_trajectory(options, simulator, ruc_hour):
                                                           simulator = simulator, \
                                                           hour = hour)
         # solve tracking
-        thermal_track.pass_schedule_to_track(m = projection_m,\
-                                             market_signals = market_signals, \
-                                             last_implemented_time_step = 0,\
-                                             hour = hour,\
-                                             projection = True)
+        tracker.pass_schedule_to_track(m = projection_m,\
+                                       market_signals = market_signals, \
+                                       last_implemented_time_step = 0,\
+                                       hour = hour,\
+                                       projection = True)
 
     return get_full_projected_trajectory(options,simulator)
 
@@ -218,7 +218,7 @@ def bid_into_DAM(options, simulator, ruc_instance, ruc_date, ruc_hour):
     is_first_day = simulator.time_manager.current_time is None
 
     # unpack bid object
-    thermal_bid = simulator.data_manager.extensions['thermal_bid']
+    bidder = simulator.data_manager.extensions['bidder']
 
     if not is_first_day:
 
@@ -227,12 +227,12 @@ def bid_into_DAM(options, simulator, ruc_instance, ruc_date, ruc_hour):
                                                                 simulator, \
                                                                 ruc_hour)
         # update the bidding model
-        thermal_bid.update_model(implemented_power_output = full_projected_trajectory['power'],\
-                                 implemented_shut_down = full_projected_trajectory['shut_down'], \
-                                 implemented_start_up = full_projected_trajectory['start_up'])
+        bidder.update_model(implemented_power_output = full_projected_trajectory['power'],\
+                            implemented_shut_down = full_projected_trajectory['shut_down'], \
+                            implemented_start_up = full_projected_trajectory['start_up'])
 
     # generate bids
-    bids = thermal_bid.stochastic_bidding(ruc_date)
+    bids = bidder.stochastic_bidding(ruc_date)
     if is_first_day:
         simulator.data_manager.extensions['current_bids'] = bids
         simulator.data_manager.extensions['next_bids'] = bids
@@ -243,7 +243,7 @@ def bid_into_DAM(options, simulator, ruc_instance, ruc_date, ruc_hour):
     pass_bid_to_prescient(options, ruc_instance, ruc_date, bids)
 
     # record bids
-    # thermal_bid.record_bids()
+    # bidder.record_bids()
 
     return
 prescient.plugins.register_before_ruc_solve_callback(bid_into_DAM)
@@ -287,7 +287,7 @@ def track_sced_signal(options, simulator, sced_instance):
     current_hour = simulator.time_manager.current_time.hour
 
     # unpack tracker
-    thermal_track = simulator.data_manager.extensions['thermal_track']
+    tracker = simulator.data_manager.extensions['tracker']
 
     # get market signals
     market_signals = assemble_sced_tracking_market_signals(options = options, \
@@ -296,11 +296,11 @@ def track_sced_signal(options, simulator, sced_instance):
                                                            hour = current_hour)
 
     # actual tracking
-    thermal_track.pass_schedule_to_track(m = thermal_track.model,\
-                                         market_signals = market_signals, \
-                                         last_implemented_time_step = 0, \
-                                         date = current_date,\
-                                         hour = current_hour)
+    tracker.pass_schedule_to_track(m = tracker.model,\
+                                   market_signals = market_signals, \
+                                   last_implemented_time_step = 0, \
+                                   date = current_date,\
+                                   hour = current_hour)
 
     return
 prescient.plugins.register_after_operations_callback(track_sced_signal)
@@ -308,9 +308,9 @@ prescient.plugins.register_after_operations_callback(track_sced_signal)
 def update_observed_thermal_dispatch(options, simulator, ops_stats):
 
     # unpack tracker
-    thermal_track = simulator.data_manager.extensions['thermal_track']
+    tracker = simulator.data_manager.extensions['tracker']
     g = options.bidding_generator
-    ops_stats.observed_thermal_dispatch_levels[g] = thermal_track.get_last_delivered_power(generator = g)
+    ops_stats.observed_thermal_dispatch_levels[g] = tracker.get_last_delivered_power(generator = g)
 
     return
 prescient.plugins.register_update_operations_stats_callback(update_observed_thermal_dispatch)
@@ -324,13 +324,13 @@ def after_ruc_activation(options, simulator):
     return
 prescient.plugins.register_after_ruc_activation_callback(after_ruc_activation)
 
-def write_customize_results(options, simulator):
+def write_plugin_results(options, simulator):
 
     '''
     write results in bidding and tracking objects
     '''
     pass
-prescient.plugins.register_after_simulation_callback(write_customize_results)
+prescient.plugins.register_after_simulation_callback(write_plugin_results)
 
 '''
 

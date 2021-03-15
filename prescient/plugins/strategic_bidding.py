@@ -79,8 +79,8 @@ class DAM_thermal_bidding:
         self.model_data = self.assemble_model_data(generator_names = generators, \
                                                    rts_gmlc_data_dir = rts_gmlc_data_dir)
         self.model = self.build_thermal_bidding_model(plan_horizon = horizon,
-                                                      segment_number = 4,
-                                                      n_scenario = 10)
+                                                      segment_number = 4)
+        self.bids_result_list = []
 
     @staticmethod
     def assemble_model_data(generator_names, rts_gmlc_data_dir, **kwargs):
@@ -212,8 +212,7 @@ class DAM_thermal_bidding:
 
     def build_thermal_bidding_model(self,
                                     plan_horizon = 48,
-                                    segment_number = 4,
-                                    n_scenario = 10):
+                                    segment_number = 4):
 
         model_data = self.model_data
         m = pyo.ConcreteModel()
@@ -222,12 +221,9 @@ class DAM_thermal_bidding:
         m.HOUR = pyo.Set(initialize = range(plan_horizon))
         m.SEGMENTS = pyo.Set(initialize = range(1, segment_number))
         m.UNITS = pyo.Set(initialize = model_data['Generator'], ordered = True)
-        m.SCENARIOS = pyo.Set(initialize = range(n_scenario))
+        m.SCENARIOS = pyo.Set(initialize = range(self.n_scenario))
 
         ## define the parameters
-
-        # add power schedule as a Param
-        m.power_dispatch = pyo.Param(m.UNITS,m.HOUR, initialize = 0, mutable = True)
 
         m.DAM_price = pyo.Param(m.HOUR,m.SCENARIOS,initialize = 20, mutable = True)
 
@@ -677,6 +673,9 @@ class DAM_thermal_bidding:
         # extract the bids out from the model
         bids = self.get_bid_power_price()
 
+        # record the bids
+        self._record_bids(date,bids)
+
         return bids
 
     def get_bid_power_price(self):
@@ -746,8 +745,47 @@ class DAM_thermal_bidding:
 
         return bids
 
-    def record_bids(self,ruc_date):
+    def _record_bids(self,ruc_date,bids):
         '''
         cols: gen, date, hour, power 1, ..., power n, price 1, ..., price n
         '''
-        pass
+
+        df_list = []
+        for t in bids:
+            for gen in bids[t]:
+
+                result_dict = {}
+                result_dict['Date'] = ruc_date
+                result_dict['Hour'] = t
+
+                pair_cnt = 0
+                for power, cost in bids[t][gen].items():
+                    result_dict['Power {} [MW]'.format(pair_cnt)] = power
+                    result_dict['Cost {} [$]'.format(pair_cnt)] = cost
+
+                    pair_cnt += 1
+
+                # place holder, in case different len of bids
+                while pair_cnt < self.n_scenario:
+
+                    result_dict['Power {} [MW]'.format(pair_cnt)] = None
+                    result_dict['Cost {} [$]'.format(pair_cnt)] = None
+
+                    pair_cnt += 1
+
+                result_df = pd.DataFrame.from_dict(result_dict,orient = 'index')
+                df_list.append(result_df.T)
+
+        # save the result to object property
+        # wait to be written when simulation ends
+        self.bids_result_list.append(pd.concat(df_list))
+
+        return
+
+    def write_results(self,path):
+
+        print('')
+        print('Saving bidding results to disk...')
+        pd.concat(self.bids_result_list).to_csv(os.path.join(path,'bid_detail.csv'), \
+                                                index = False)
+        return
